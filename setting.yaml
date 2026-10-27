@@ -2,12 +2,10 @@
 # 修改後重新啟動 python .\vtuberAI.py 生效。
 # tts.reference_audio：音色參考；generation：Index-TTS 語言、時長與取樣。
 
-# 本機 setting.yaml 存在時優先讀取；Token 請僅填入該檔（已排除 Git）。
+# Twitch 匿名 IRC：只需頻道名稱，不需要帳號或 Token。
 twitch:
-  enabled: false
-  username: ''
-  channel: ''
-  token: ''
+  enabled: true
+  channel: natsume0304
   reconnect_seconds: 5
   ignored_users: []
 

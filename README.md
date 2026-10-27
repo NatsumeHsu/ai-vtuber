@@ -57,9 +57,9 @@ setting.yml 保留原本的 live2d、llm、chat、asr 與 output 設定。
 攝影機擷取格式可設定 camera_tracking.width、height、pixel_format、fps，預設 YUY2 640×360 / 30 FPS。
 # Twitch 聊天輸入
 
-主程式優先讀取本機 `setting.yaml`，不存在時讀取 `setting.yml`。兩者為完整設定檔，不會互相合併；後續請修改正在使用的設定檔。
-本機 `setting.yaml` 已排除 Git，OAuth Token 僅填入此檔。首次設定可複製 `example.yml` 為 `setting.yaml`，先調整模型、參考音檔與攝影機設定，再設定 `twitch.enabled: true`，並填寫 `username`、`channel`、`token`（需要 `chat:read` 權限）。不再讀取 Node 專案的 `.env`。
+主程式優先讀取本機 `setting.yml`，不存在時讀取 `setting.yml`。兩者為完整設定檔，不會互相合併；後續請修改正在使用的設定檔。
+本機 `setting.yml` 已排除 Git。首次設定可複製 `example.yml` 為 `setting.yml`，先調整模型、參考音檔與攝影機設定，再設定 `twitch.enabled: true`，填寫 `channel`（Twitch 頻道帳號），即可匿名連線 IRC，不需要 Token 或登入帳號。不再讀取 Node 專案的 `.env`。
 
-啟動原本的 `start.bat` 即可。模型載入完成後自動連線，觀眾名稱與訊息會進入主程式文字對話流程，並保留於原本的對話紀錄。所有訊息與手動輸入共用先進先出的佇列；前一則完成生成、語音合成及播放後才處理下一則，忙碌時持續收訊排隊。略過登入帳號自身與 `twitch.ignored_users` 名單，斷線按 `reconnect_seconds` 自動重連。
+啟動原本的 `start.bat` 即可。模型載入完成後自動連線，閒置時接受一則聊天室訊息，觀眾名稱與訊息會進入主程式文字對話流程，並保留於原本的對話紀錄。從接受訊息到回覆生成、語音合成及播放完成期間，新聊天室訊息直接略過，不排隊、不補讀；手動輸入或錄音處理中也會略過聊天室訊息。完成後接受下一則新訊息。略過 `twitch.ignored_users` 名單，斷線按 `reconnect_seconds` 自動重連。
 
-訊息佇列僅存在記憶體，關閉程式會清空尚未處理的訊息。此整合只讀取聊天並在本機回覆，不會傳送訊息到 Twitch，也不包含原 Node 專案的點歌或 OBS 網頁。
+聊天室連線在處理期間維持運作並回應 PING，但略過當時的新訊息，避免完成後收到積壓的舊訊息。透過 TLS 直接連線 `irc.chat.twitch.tv:6697`，斷線後自動重連。此整合只讀取聊天並在本機回覆，不會傳送訊息到 Twitch，也不包含原 Node 專案的點歌或 OBS 網頁。

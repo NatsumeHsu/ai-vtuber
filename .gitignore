@@ -163,7 +163,7 @@ flagged/
 *.key
 setting.local.yml
 setting.local.yaml
-/setting.yaml
+/setting.yml
 
 # Editors and operating systems
 .idea/

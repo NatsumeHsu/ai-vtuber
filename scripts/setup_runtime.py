@@ -16,9 +16,7 @@ def main():
     parser.add_argument('--device',choices=('auto','cpu','cuda'),default='auto')
     args=parser.parse_args()
     assert sys.version_info[:2] == (3, 11), sys.version
-    settings_path = ROOT / 'setting.yaml'
-    if not settings_path.is_file():
-        settings_path = ROOT / 'setting.yml'
+    settings_path = ROOT / 'setting.yml'
     settings = yaml.safe_load(settings_path.read_text(encoding='utf-8-sig'))
     if args.device != 'auto':
         cuda=args.device=='cuda'

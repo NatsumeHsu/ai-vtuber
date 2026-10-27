@@ -15,7 +15,7 @@ class VtuberAI:
 
     def __init__(self, settings_path=None):
         self.root = Path(__file__).resolve().parent
-        default_settings = self.root / 'setting.yaml'
+        default_settings = self.root / 'setting.yml'
         if not default_settings.is_file():
             default_settings = self.root / 'setting.yml'
         self.settings_path = default_settings if settings_path is None else Path(settings_path).resolve()
@@ -48,6 +48,7 @@ class VtuberAI:
         self.control_window = None
         self.control_events = queue.Queue()
         self.conversation_jobs = queue.Queue()
+        self.conversation_gate = threading.Lock()
         self.recording_cancelled = threading.Event()
         self.recording_finished = threading.Event()
         self.control_busy = False
@@ -784,6 +785,8 @@ class VtuberAI:
         text = self.control_text.get().strip() if kind == 'text' else ''
         if kind == 'text' and not text:
             return
+        if not self.conversation_gate.acquire(blocking=False):
+            return
         self.recording_cancelled.clear()
         self.recording_finished.clear()
         self.set_control_ready(False)
@@ -796,10 +799,11 @@ class VtuberAI:
         self.conversation_jobs.put((kind, speaker, text))
 
     def enqueue_twitch_message(self, speaker, text):
-        """收訊執行緒只排隊；與手動輸入共用單一推論及播放流程。"""
-        if not self.stop.is_set():
-            self.conversation_jobs.put(('text', speaker, text))
-            self.post_control_event('log', f'Twitch 已排隊：{speaker}：{text}')
+        """只在閒置時接收一則訊息，忙碌時略過，不累積待處理訊息。"""
+        if self.stop.is_set() or not self.conversation_gate.acquire(blocking=False):
+            return False
+        self.conversation_jobs.put(('text', speaker, text))
+        return True
 
     def update_control_window(self):
         while True:
@@ -870,6 +874,7 @@ class VtuberAI:
                 self.post_control_event('error', str(exc))
             finally:
                 self.post_control_event('done', None)
+                self.conversation_gate.release()
 
 if __name__ == '__main__':
     VtuberAI().run()
