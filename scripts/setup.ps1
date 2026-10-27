@@ -53,7 +53,7 @@ try {
             }
             if (-not $basePython -and (Get-Command python -ErrorAction SilentlyContinue)) {
                 try {
-                    $candidate = & python -c 'import sys; print(sys.executable if sys.version_info[:2] == (3,12) else "")' 2>$null
+                    $candidate = & python -c 'import sys; print(sys.executable if sys.version_info[:2] == (3,12) else '''')' 2>$null
                     if ($LASTEXITCODE -eq 0 -and $candidate) { $basePython = [string]$candidate }
                 } catch { Write-Host 'No usable Python 3.12 on PATH.' }
             }
@@ -73,7 +73,8 @@ try {
             & $basePython -m venv (Join-Path $root '.venv')
             if ($LASTEXITCODE -ne 0) { throw 'Could not create virtual environment.' }
         }
-        Run-Python @('-c', 'import sys,struct,tkinter; assert sys.version_info[:2]==(3,12) and struct.calcsize("P")==8, "Python 3.12 x64 required; rename incompatible .venv and retry"')
+        # Python single quotes survive Windows PowerShell's native argument passing.
+        Run-Python @('-c', 'import sys,struct,tkinter; assert sys.version_info[:2]==(3,12) and struct.calcsize(''P'')==8, ''Python 3.12 x64 required; rename incompatible .venv and retry''')
         Run-Python @('-m','pip','install','--upgrade','pip','wheel','setuptools<81')
         $useCuda = $Device -eq 'cuda'
         if ($Device -eq 'auto' -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
