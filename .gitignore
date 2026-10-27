@@ -36,11 +36,6 @@ checkpoints/
 weights/
 GPT_weights*/
 SoVITS_weights*/
-/GPT_SoVITS/text/G2PWModel/
-/GPT_SoVITS/tools/asr/models/
-/GPT_SoVITS/tools/uvr5/uvr5_weights/
-/GPT_SoVITS/tools/denoise-model/
-/GPT_SoVITS/tools/AP_BWE_main/24kto48k/
 *.gguf
 *.ggml
 *.safetensors
@@ -141,10 +136,8 @@ flagged/
 !/uv.lock
 !/poetry.lock
 !/Pipfile.lock
-/GPT_SoVITS/text/engdict-hot.rep
 
 # Local executables, native build products and downloaded archives
-/GPT_SoVITS/bin/
 *.exe
 *.dll
 *.pyd
@@ -183,3 +176,7 @@ setting.local.yaml
 Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+TEMP-env-backup-*/
+/index-tts/
+/work/

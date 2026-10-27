@@ -1,4 +1,4 @@
-"""原生 Live2D 視窗、白名單表情與 GPT-SoVITS 音量嘴型；無 API。"""
+"""原生 Live2D 視窗、白名單表情與 Index-TTS 音量嘴型；無 API。"""
 from contextlib import closing
 import json
 import numpy as np
@@ -37,15 +37,6 @@ class VtuberAI:
         self.history_turns = self.chat_settings['history_turns']
         self.auto_play = self.output_settings['auto_play']
         self.output_path = self.output_settings['path']
-        self.tts_config = self.tts_settings['config_path']
-        self.gpt_weights = self.tts_settings['gpt_weights']
-        self.sovits_weights = self.tts_settings['sovits_weights']
-        self.tts_params = {}
-        for category in ('reference', 'text', 'sampling', 'batch', 'audio', 'acceleration'):
-            group = self.tts_settings.get(category)
-            if not isinstance(group, dict):
-                raise ValueError(f'setting.yml 缺少語音設定分類：tts.{category}')
-            self.tts_params.update(group)
         self.speaker_name = self.chat_settings['speaker_name']
         self._init_view(self.project_path(self.live2d_settings['model_path']), size=(800, 900), scale=1.0, mouth_gain=6.0, emotion_map=self.live2d_settings['emotion_map'])
         self.database_path = self.project_path(self.chat_settings['database_path'])
@@ -115,37 +106,23 @@ class VtuberAI:
 
     def synthesize(self, text):
         """放在 AI 背景執行緒呼叫；保持同步播放，結束後才回到麥克風收音。"""
-        tts, params, output, play = self.tts, self.params, self.output, self.auto_play
+        import soundfile as sf
         if self.stop.is_set():
             return
         emotion, spoken = self.split_dialogue(text, self.emotions)
         if not spoken:
             return
-        request = dict(params)
-        request.update(text=spoken, streaming_mode=False, return_fragment=False, gpt_streaming=False)
-        generator = tts.run(request)
-        chunks, sample_rate = ([], None)
-        try:
-            for sr, audio in generator:
-                if self.stop.is_set():
-                    return
-                if sample_rate is not None and sample_rate != sr:
-                    raise RuntimeError('TTS 音訊取樣率不一致')
-                sample_rate = sr
-                chunks.append(np.asarray(audio))
-        finally:
-            generator.close()
-        if not chunks:
-            raise RuntimeError('TTS 未產生音訊')
-        audio = np.concatenate(chunks)
+        output = self.output
+        from emotion_middleware import EmotionAnalyzer
+        analyzer = EmotionAnalyzer(self.llm, self.tts_settings.get('emotion_analysis', {}))
+        self.last_emo_vector = analyzer.analyze(spoken)
+        self.last_emotion_error = analyzer.last_error
+        print('TTS emo_vector:', self.last_emo_vector, flush=True)
+        self.tts.synthesize(spoken, output, emo_vector=self.last_emo_vector)
+        audio, sample_rate = sf.read(str(output), dtype='float32')
         if not audio.size:
-            raise RuntimeError('TTS 產生空音訊')
-        if output is not None:
-            import soundfile as sf
-            output = Path(output)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            sf.write(str(output), audio, sample_rate, subtype='PCM_16', format='WAV')
-            print(f'音訊已儲存：{output}')
+            raise RuntimeError('Index-TTS 產生空音訊')
+        play = self.auto_play
         if play and (not self.stop.is_set()):
             self.commands.put(('emotion', emotion))
             try:
@@ -290,6 +267,9 @@ class VtuberAI:
             if initialized:
                 live2d.dispose()
             pygame.quit()
+            tts = self.tts
+            if tts is not None:
+                tts.close()
             self.camera_stop.set()
             if self.camera_thread is not None:
                 self.camera_thread.join(timeout=2)
@@ -482,31 +462,22 @@ class VtuberAI:
         return re.sub('\\s+', ' ', text).strip()
 
     def initialize_models(self):
-        self.params = dict(self.tts_params)
-        self.params['ref_audio_path'] = str(self.project_path(self.params['ref_audio_path']))
-        self.params['aux_ref_audio_paths'] = [str(self.project_path(path)) for path in self.params.get('aux_ref_audio_paths', [])]
-        self.params.update(streaming_mode=False, return_fragment=False, gpt_streaming=False)
-        for path in [self.project_path(self.gguf_model), self.project_path(self.tts_config), Path(self.params['ref_audio_path']), *map(Path, self.params['aux_ref_audio_paths'])]:
-            if not path.is_file():
-                raise FileNotFoundError(f'找不到檔案：{path}')
-        from GPT_SoVITS.tools.portable_runtime import activate
-        activate(change_cwd=True)
+        from runtime_support import prepare_runtime
+        prepare_runtime()
+        from index_tts_client import IndexTTSClient
         from llama_cpp import Llama, llama_supports_gpu_offload
-        from GPT_SoVITS.TTS_infer_pack.TTS import TTS, TTS_Config
-        if self.n_gpu_layers != 0 and (not llama_supports_gpu_offload()):
+        if self.n_gpu_layers != 0 and not llama_supports_gpu_offload():
             raise RuntimeError('目前的 llama-cpp-python 沒有 GPU 加速支援')
-        print('載入 GPT-SoVITS……')
-        config = TTS_Config(str(self.project_path(self.tts_config)))
-        config.device = self.tts_settings['device']
-        if self.gpt_weights:
-            config.t2s_weights_path = str(self.project_path(self.gpt_weights))
-        if self.sovits_weights:
-            config.vits_weights_path = str(self.project_path(self.sovits_weights))
-        for path in [config.t2s_weights_path, config.vits_weights_path]:
-            if not Path(path).is_file():
-                raise FileNotFoundError(f'找不到模型權重：{path}')
+        if not self.project_path(self.gguf_model).is_file():
+            raise FileNotFoundError(self.project_path(self.gguf_model))
         self.recognizer, self.converter = self.init_asr() if self.asr_settings['enabled'] else (None, None)
-        self.tts = TTS(config)
+        if self.stop.is_set():
+            return
+        print('載入 Index-TTS……')
+        self.tts = IndexTTSClient(self.root, self.tts_settings)
+        if self.stop.is_set():
+            self.tts.close()
+            return
         print('載入 GGUF……')
         self.llm = Llama(model_path=str(self.project_path(self.gguf_model)), n_gpu_layers=self.n_gpu_layers, n_ctx=self.n_ctx, verbose=self.llm_settings['verbose'])
         self.output = self.project_path(self.output_path)
@@ -557,12 +528,16 @@ class VtuberAI:
 
     def close(self):
         self.stop.set()
-        if self.llm is not None:
-            self.llm.close()
-            self.llm = None
-        self.tts = None
-        self.recognizer = None
-        self.converter = None
+        tts, self.tts = self.tts, None
+        try:
+            if tts is not None:
+                tts.close()
+        finally:
+            if self.llm is not None:
+                self.llm.close()
+                self.llm = None
+            self.recognizer = None
+            self.converter = None
 
     def _ai_worker(self):
         try:
