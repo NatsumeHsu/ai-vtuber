@@ -1,84 +1,32 @@
-"""透過 FFmpeg DirectShow 依名稱讀取 Windows 虛擬攝影機。"""
-import queue
-import subprocess
-import threading
-from collections import deque
-import time
-
-import numpy as np
+"""Capture DirectShow cameras in process through OpenCV."""
+import cv2
+from cv2_enumerate_cameras import enumerate_cameras
 
 
 class VirtualCamera:
-    def __init__(self, ffmpeg, name, width=640, height=480, fps=15, startup_timeout=15):
-        self.width, self.height = width, height
-        self.frames = queue.Queue(maxsize=1)
-        self.closed = threading.Event()
-        self.errors = deque(maxlen=20)
-        self.startup_timeout = startup_timeout
-        self.received_frame = False
-        self.process = subprocess.Popen(
-            [str(ffmpeg), '-hide_banner', '-loglevel', 'error', '-f', 'dshow',
-             '-rtbufsize', '64M', '-pixel_format', 'yuyv422', '-video_size', '640x360',
-             '-framerate', '30', '-i', 'video=' + name, '-an', '-threads', '1',
-             '-filter_threads', '1', '-vf', f'scale={width}:{height}',
-             '-r', str(fps), '-pix_fmt', 'bgr24', '-f', 'rawvideo', 'pipe:1'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        self.reader = threading.Thread(target=self._read_frames, daemon=True)
-        self.reader.start()
-        self.error_reader = threading.Thread(target=self._read_errors, daemon=True)
-        self.error_reader.start()
-
-    def _read_errors(self):
-        for line in iter(self.process.stderr.readline, b''):
-            self.errors.append(line.decode('utf-8', errors='replace').strip())
-
-    @property
-    def error(self):
-        return '\n'.join(self.errors) or f'FFmpeg exit={self.process.poll()}；攝影機未送出影格'
-
-    def _read_frames(self):
-        size = self.width * self.height * 3
-        try:
-            while not self.closed.is_set():
-                data = bytearray()
-                while len(data) < size:
-                    chunk = self.process.stdout.read(size - len(data))
-                    if not chunk:
-                        return
-                    data.extend(chunk)
-                frame = np.frombuffer(data, dtype=np.uint8).reshape(self.height, self.width, 3)
-                try:
-                    self.frames.get_nowait()
-                except queue.Empty:
-                    pass
-                self.frames.put_nowait(frame)
-        finally:
-            self.closed.set()
+    def __init__(self, name, width=640, height=360, fps=30, pixel_format='YUY2'):
+        if isinstance(name, str) and not name.isdecimal():
+            matches = [camera for camera in enumerate_cameras(cv2.CAP_DSHOW) if camera.name == name]
+            if len(matches) != 1:
+                raise RuntimeError(f'攝影機名稱必須符合唯一裝置：{name}，符合 {len(matches)} 個')
+            index = matches[0].index
+        else:
+            index = int(name)
+        self.capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        self.error = ''
+        if not self.capture.isOpened():
+            self.release()
+            raise RuntimeError(f'無法開啟攝影機：{name}')
+        self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pixel_format))
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.capture.set(cv2.CAP_PROP_FPS, fps)
 
     def read(self):
-        deadline = time.monotonic() + (3 if self.received_frame else self.startup_timeout)
-        while time.monotonic() < deadline:
-            try:
-                frame = self.frames.get(timeout=0.1)
-                self.received_frame = True
-                return True, frame
-            except queue.Empty:
-                if self.closed.is_set() or self.process.poll() is not None:
-                    break
-        return False, None
+        ok, frame = self.capture.read()
+        if not ok:
+            self.error = 'OpenCV DirectShow 未取得影像'
+        return ok, frame
 
     def release(self):
-        self.closed.set()
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=2)
-        self.reader.join(timeout=1)
-        self.error_reader.join(timeout=1)
-        self.process.stdout.close()
-        self.process.stderr.close()
+        self.capture.release()

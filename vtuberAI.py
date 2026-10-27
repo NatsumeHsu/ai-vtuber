@@ -15,7 +15,11 @@ class VtuberAI:
 
     def __init__(self, settings_path=None):
         self.root = Path(__file__).resolve().parent
-        self.settings_path = self.root / 'setting.yml' if settings_path is None else Path(settings_path).resolve()
+        default_settings = self.root / 'setting.yaml'
+        if not default_settings.is_file():
+            default_settings = self.root / 'setting.yml'
+        self.settings_path = default_settings if settings_path is None else Path(settings_path).resolve()
+        self.twitch = None
         self.llm = None
         self.tts = None
         self.recognizer = None
@@ -528,6 +532,9 @@ class VtuberAI:
 
     def close(self):
         self.stop.set()
+        if self.twitch is not None:
+            self.twitch.close()
+            self.twitch = None
         tts, self.tts = self.tts, None
         try:
             if tts is not None:
@@ -543,6 +550,14 @@ class VtuberAI:
         try:
             self.post_control_event('status', '載入模型中……')
             self.initialize_models()
+            if self.settings.get('twitch', {}).get('enabled', False) and not self.stop.is_set():
+                from twitch_chat import TwitchChat
+                try:
+                    self.twitch = TwitchChat(self.settings['twitch'], self.enqueue_twitch_message,
+                                             lambda text: self.post_control_event('log', text))
+                    self.twitch.start()
+                except ValueError as exc:
+                    self.post_control_event('log', str(exc))
             self.post_control_event('ready', None)
             self.conversation_loop()
         except Exception as exc:
@@ -614,49 +629,34 @@ class VtuberAI:
             if detector.empty():
                 raise RuntimeError('無法載入人臉偵測模型')
             device = config.get('device', 0)
-            if isinstance(device, str) and not device.isdecimal():
-                from virtual_camera import VirtualCamera
-                capture = VirtualCamera(self.root / 'ffmpeg.exe', device, fps=max(1, float(config.get('fps', 15))), startup_timeout=float(config.get('startup_timeout', 15)))
-            else:
-                capture = cv2.VideoCapture(int(device), cv2.CAP_DSHOW)
-                if not capture.isOpened():
-                    capture.release()
-                    capture = cv2.VideoCapture(int(device))
-                if not capture.isOpened():
-                    raise RuntimeError('無法開啟攝影機，請檢查裝置編號、權限或其他程式是否占用')
-                capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            from virtual_camera import VirtualCamera
+            def open_camera():
+                return VirtualCamera(device, width=int(config.get('width', 640)),
+                                     height=int(config.get('height', 360)),
+                                     fps=max(1, float(config.get('fps', 30))),
+                                     pixel_format=config.get('pixel_format', 'YUY2'))
+            capture = open_camera()
             self.post_control_event('camera', '眼睛追蹤：等待人臉')
             last_seen = time.monotonic()
             found_before = False
             interval = 1 / max(1, float(config.get('fps', 15)))
             reconnects = 0
-            consecutive_timeouts = 0
             while not self.stop.is_set() and not self.camera_stop.is_set():
                 ok, frame = capture.read()
                 if not ok:
                     if self.stop.is_set() or self.camera_stop.is_set():
                         break
                     self.gaze_target = (0.0, 0.0)
-                    consecutive_timeouts += 1
-                    if hasattr(capture, 'process'):
-                        # 活著的串流容許短暫停頓，不因單次逾時立即停用追蹤。
-                        if capture.process.poll() is None and consecutive_timeouts < 3:
-                            self.post_control_event('camera', '眼睛追蹤：等待虛擬攝影機恢復影像')
-                            continue
-                        error = capture.error
-                        capture.release()
-                        if reconnects < int(config.get('reconnect_attempts', 3)):
-                            reconnects += 1
-                            self.post_control_event('camera', f'眼睛追蹤：重新連線 {reconnects}，{error}')
-                            if self.camera_stop.wait(1) or self.stop.is_set():
-                                break
-                            capture = VirtualCamera(self.root / 'ffmpeg.exe', device, fps=max(1, float(config.get('fps', 15))), startup_timeout=float(config.get('startup_timeout', 15)))
-                            consecutive_timeouts = 0
-                            continue
-                        raise RuntimeError(f'虛擬攝影機重連失敗：{error}')
-                    raise RuntimeError('讀取攝影機影像失敗')
-                consecutive_timeouts = 0
+                    error = capture.error
+                    capture.release()
+                    if reconnects < int(config.get('reconnect_attempts', 3)):
+                        reconnects += 1
+                        self.post_control_event('camera', f'眼睛追蹤：重新連線 {reconnects}，{error}')
+                        if self.camera_stop.wait(1) or self.stop.is_set():
+                            break
+                        capture = open_camera()
+                        continue
+                    raise RuntimeError(f'攝影機重連失敗：{error}')
                 height, width = frame.shape[:2]
                 if gestures is not None:
                     try:
@@ -795,6 +795,12 @@ class VtuberAI:
         self.control_status.set('處理中……')
         self.conversation_jobs.put((kind, speaker, text))
 
+    def enqueue_twitch_message(self, speaker, text):
+        """收訊執行緒只排隊；與手動輸入共用單一推論及播放流程。"""
+        if not self.stop.is_set():
+            self.conversation_jobs.put(('text', speaker, text))
+            self.post_control_event('log', f'Twitch 已排隊：{speaker}：{text}')
+
     def update_control_window(self):
         while True:
             try:
@@ -813,6 +819,8 @@ class VtuberAI:
             elif kind in ('ready', 'done'):
                 self.set_control_ready(True)
                 self.control_status.set('準備完成，可以開始錄音或輸入文字')
+            elif kind == 'busy':
+                self.set_control_ready(False)
             elif kind in ('log', 'error'):
                 self.control_log.configure(state='normal')
                 self.control_log.insert('end', value + '\n\n')
@@ -831,6 +839,7 @@ class VtuberAI:
             except queue.Empty:
                 continue
             try:
+                self.post_control_event('busy', None)
                 self.speaker_name = speaker
                 if kind == 'clear':
                     self.clear_history()

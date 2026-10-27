@@ -50,3 +50,5 @@ tqdm>=4.67.1
 openai-whisper>=20231117
 fugashi[unidic-lite]
 wetext>=0.0.9; sys_platform != 'linux'
+
+cv2-enumerate-cameras==1.4.0

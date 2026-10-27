@@ -14,7 +14,8 @@ IndexTTS 上游的 NumPy/OpenCV 版本限制以本專案相容版本取代；
 不要在 index-tts 執行 uv sync。
 llama-cpp-python 0.3.36 使用官方 CUDA 13.0 wheel，並安裝獨立 CUDA 13 執行庫；
 PyTorch 保持 CUDA 12.8，兩套原生執行庫使用不同 DLL 名稱。
-主程式透過標準輸入輸出呼叫常駐 Index-TTS 程序，模型只載入一次。
+LLM、ASR、Index-TTS、Live2D 與攝影機均在同一個 Python process 執行，使用執行緒維持介面回應，TTS 模型只載入一次。
+攝影機改用 OpenCV DirectShow，不再啟動 FFmpeg process。
 
 `setup.bat -CheckOnly` 可驗證環境、GPU 與模型檔案。
 既有模型和 FFmpeg 必須保留；安裝器不再下載 GPT-SoVITS 模型。
@@ -25,7 +26,6 @@ PyTorch 保持 CUDA 12.8，兩套原生執行庫使用不同 DLL 名稱。
 編輯 setting.yml 的 tts：
 
 - root: index-tts
-- python: .venv/Scripts/python.exe
 - config_path: checkpoints/config.yaml（相對於 Index-TTS 目錄）
 - model_dir: checkpoints（相對於 Index-TTS 目錄）
 - reference_audio: 參考音檔路徑，支援絕對路徑與專案相對路徑
@@ -47,8 +47,19 @@ Live2D 表情標記與情感向量各自運作，原有 LLM、ASR、Live2D 設�
 
 雙擊 start.bat，或執行 `.venv/Scripts/python.exe -X utf8 vtuberAI.py`。
 等待模型載入後，可輸入文字或錄音對話；回覆會寫入 output.wav、播放並帶動嘴型。
-主要程式日誌位於 logs/vtuber.log；語音程序日誌位於 logs/index-tts.log。
-關閉控制視窗會結束語音背景程序。
+全部執行日誌統一寫入 logs/vtuber.log。
+關閉控制視窗會停止工作執行緒並釋放模型。
+模型載入與推論不提供強制逾時中止，舊 tts.startup_timeout、tts.inference_timeout 設定已移除。
 
 setting.yml 保留原本的 live2d、llm、chat、asr 與 output 設定。
 攝影機裝置可在 live2d.camera_tracking.device 修改；關閉追蹤設 enabled: false。
+
+攝影機擷取格式可設定 camera_tracking.width、height、pixel_format、fps，預設 YUY2 640×360 / 30 FPS。
+# Twitch 聊天輸入
+
+主程式優先讀取本機 `setting.yaml`，不存在時讀取 `setting.yml`。兩者為完整設定檔，不會互相合併；後續請修改正在使用的設定檔。
+本機 `setting.yaml` 已排除 Git，OAuth Token 僅填入此檔。首次設定可複製 `example.yml` 為 `setting.yaml`，先調整模型、參考音檔與攝影機設定，再設定 `twitch.enabled: true`，並填寫 `username`、`channel`、`token`（需要 `chat:read` 權限）。不再讀取 Node 專案的 `.env`。
+
+啟動原本的 `start.bat` 即可。模型載入完成後自動連線，觀眾名稱與訊息會進入主程式文字對話流程，並保留於原本的對話紀錄。所有訊息與手動輸入共用先進先出的佇列；前一則完成生成、語音合成及播放後才處理下一則，忙碌時持續收訊排隊。略過登入帳號自身與 `twitch.ignored_users` 名單，斷線按 `reconnect_seconds` 自動重連。
+
+訊息佇列僅存在記憶體，關閉程式會清空尚未處理的訊息。此整合只讀取聊天並在本機回覆，不會傳送訊息到 Twitch，也不包含原 Node 專案的點歌或 OBS 網頁。

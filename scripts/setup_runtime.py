@@ -1,7 +1,6 @@
 """Validate the shared Python environment and required local assets."""
 import importlib
 from pathlib import Path
-import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +16,10 @@ def main():
     parser.add_argument('--device',choices=('auto','cpu','cuda'),default='auto')
     args=parser.parse_args()
     assert sys.version_info[:2] == (3, 11), sys.version
-    settings = yaml.safe_load((ROOT / 'setting.yml').read_text(encoding='utf-8-sig'))
+    settings_path = ROOT / 'setting.yaml'
+    if not settings_path.is_file():
+        settings_path = ROOT / 'setting.yml'
+    settings = yaml.safe_load(settings_path.read_text(encoding='utf-8-sig'))
     if args.device != 'auto':
         cuda=args.device=='cuda'
         settings['llm']['n_gpu_layers']=-1 if cuda else 0
@@ -25,10 +27,10 @@ def main():
         settings['tts']['device']='cuda:0' if cuda else 'cpu'
         settings['tts']['use_bf16']=cuda
         import shutil
-        shutil.copy2(ROOT/'setting.yml',ROOT/'setting.yml.device.bak')
-        (ROOT/'setting.yml').write_text(yaml.safe_dump(settings,allow_unicode=True,sort_keys=False),encoding='utf-8')
+        shutil.copy2(settings_path, settings_path.with_suffix(settings_path.suffix + '.device.bak'))
+        settings_path.write_text(yaml.safe_dump(settings,allow_unicode=True,sort_keys=False),encoding='utf-8')
     for module in ('numpy', 'cv2', 'mediapipe', 'live2d', 'pygame', 'OpenGL',
-                   'sounddevice', 'soundfile', 'opencc', 'funasr', 'llama_cpp', 'torch', 'torchaudio'):
+                   'cv2_enumerate_cameras', 'sounddevice', 'soundfile', 'opencc', 'funasr', 'llama_cpp', 'torch', 'torchaudio'):
         importlib.import_module(module)
         print('Import OK:', module, flush=True)
     import torch
@@ -54,13 +56,12 @@ def main():
     require('ffmpeg.exe')
     require('ffprobe.exe')
     engine = ROOT / settings['tts']['root']
-    assert (ROOT / settings['tts']['python']).resolve() == (ROOT / '.venv/Scripts/python.exe').resolve(), 'TTS must share project .venv'
     require(str(engine / settings['tts']['config_path']))
-    cuda_check='assert torch.ones(1,device="cuda").add(1).item()==2; ' if settings['tts']['device'].startswith('cuda') else ''
-    subprocess.run([str(ROOT / settings['tts']['python']), '-c',
-        'import sys,torch,cv2; assert sys.version_info[:2]==(3,11); from indextts.infer_v2_5 import IndexTTS2; '
-        +cuda_check+'print("Index-TTS imports and device OK")'],
-        cwd=engine, check=True)
+    sys.path.insert(0, str(engine))
+    from indextts.infer_v2_5 import IndexTTS2
+    if settings['tts']['device'].startswith('cuda'):
+        assert torch.ones(1, device='cuda').add(1).item() == 2
+    print('Index-TTS imports and device OK', flush=True)
     print('Runtime checks passed', flush=True)
 
 if __name__ == '__main__':

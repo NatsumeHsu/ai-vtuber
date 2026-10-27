@@ -2,6 +2,15 @@
 # 修改後重新啟動 python .\vtuberAI.py 生效。
 # tts.reference_audio：音色參考；generation：Index-TTS 語言、時長與取樣。
 
+# 本機 setting.yaml 存在時優先讀取；Token 請僅填入該檔（已排除 Git）。
+twitch:
+  enabled: false
+  username: ''
+  channel: ''
+  token: ''
+  reconnect_seconds: 5
+  ignored_users: []
+
 # Live2D 模型與表情標記對應（右側為模型內的表情名稱）。
 live2d:
   camera_tracking:
@@ -20,7 +29,9 @@ live2d:
     gain: 1.5  # 眼球移動幅度
     smoothing: 0.1  # 0～1，越小越平滑
     fps: 30
-    startup_timeout: 15  # 虛擬攝影機首次影格等待秒數
+    width: 640
+    height: 360
+    pixel_format: YUY2
     reconnect_attempts: 3  # 讀取中斷時自動重連次數
     lost_seconds: 1.0  # 人臉消失多久後回正
     eye_x_parameter: ParamEyeBallX
@@ -189,14 +200,11 @@ tts:
   engine: index-tts
   text_conversion: t2s  # 僅送入語音模型的文字轉簡體；設為 null 關閉，顯示與紀錄保持原文
   root: index-tts
-  python: .venv/Scripts/python.exe
   config_path: checkpoints/config.yaml
   model_dir: checkpoints
   device: cuda:0
   use_bf16: true
   reference_audio: D:/AI/轉換後語音/001.wav
-  startup_timeout: 600
-  inference_timeout: 600
   generation:
     use_random: false
     lang: ZH
