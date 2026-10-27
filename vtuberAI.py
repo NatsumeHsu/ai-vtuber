@@ -45,6 +45,8 @@ class VtuberAI:
         self._init_view(self.project_path(self.live2d_settings['model_path']), size=(800, 900), scale=1.0, mouth_gain=6.0, emotion_map=self.live2d_settings['emotion_map'])
         self.database_path = self.project_path(self.chat_settings['database_path'])
         self.init_database()
+        from audience_memory import AudienceMemory
+        self.audience_memory = AudienceMemory(self.database_path, self.settings.get('audience_memory', {}))
         self.control_window = None
         self.control_events = queue.Queue()
         self.conversation_jobs = queue.Queue()
@@ -409,29 +411,44 @@ class VtuberAI:
         text = ''.join((item.get('text', '') for item in result))
         return self.converter.convert(re.sub('<\\|.*?\\|>', '', text).strip())
 
-    def generate_reply(self, text, speaker_name=None):
+    def generate_reply(self, text, speaker_name=None, viewer_key=None, message_id=None):
         """保留短期記憶，上下文不足時移除最舊對話。"""
         llm, history = self.llm, self.history
         recent = history[-self.history_turns * 2:] if self.history_turns > 0 else []
         speaker = self.speaker_name if speaker_name is None else speaker_name
         if not isinstance(speaker, str) or not speaker.strip():
             raise ValueError('發言者名稱不可為空')
-        user_message = {'role': 'user', 'content': json.dumps({'speaker': speaker.strip(), 'text': text}, ensure_ascii=False)}
+        viewer_key = viewer_key or 'local:' + speaker.strip()
+        if message_id is None:
+            message_id = self.audience_memory.record(viewer_key, speaker.strip(), text, 'local', 'accepted')
+        system_prompt = self.system_prompt + self.audience_memory.supplement(viewer_key)
+        user_message = {'role': 'user', 'content': json.dumps(
+            {'speaker': speaker.strip(), 'viewer_key': viewer_key, 'text': text}, ensure_ascii=False)}
         while True:
-            messages = [{'role': 'system', 'content': self.system_prompt}, *recent, user_message]
+            messages = [{'role': 'system', 'content': system_prompt}, *recent, user_message]
             tokens = llm.tokenize('\n'.join((m['content'] for m in messages)).encode('utf-8'))
             estimated = len(tokens) + len(messages) * 16 + 128 + self.max_tokens
             if estimated <= self.n_ctx:
                 break
             if not recent:
+                if system_prompt != self.system_prompt:
+                    system_prompt = self.system_prompt
+                    continue
+                self.audience_memory.finish(message_id, 'failed')
                 raise ValueError('輸入太長，請縮短文字或增加 N_CTX')
             recent = recent[2:]
-        result = llm.create_chat_completion(messages=messages, temperature=self.temperature, max_tokens=self.max_tokens)
+        try:
+            result = llm.create_chat_completion(messages=messages, temperature=self.temperature, max_tokens=self.max_tokens)
+        except Exception:
+            self.audience_memory.finish(message_id, 'failed')
+            raise
         reply = result['choices'][0]['message']['content'] or ''
         reply = re.sub('<think>.*?</think>', '', reply, flags=re.S)
         reply = reply.split('<think>', 1)[0].strip()
         if not reply:
+            self.audience_memory.finish(message_id, 'failed')
             raise RuntimeError('模型沒有產生回覆，請確認聊天模板或增加 MAX_TOKENS')
+        self.audience_memory.finish(message_id, 'replied', reply)
         self.save_chat_turn(speaker.strip(), text, reply)
         if self.history_turns > 0:
             history[:] = (recent + [user_message, {'role': 'assistant', 'content': reply}])[-self.history_turns * 2:]
@@ -551,11 +568,15 @@ class VtuberAI:
         try:
             self.post_control_event('status', '載入模型中……')
             self.initialize_models()
+            if not self.stop.is_set():
+                self.audience_memory.analyze_startup(self.llm, self.n_ctx, self.stop,
+                                                     lambda text: self.post_control_event('status', text))
             if self.settings.get('twitch', {}).get('enabled', False) and not self.stop.is_set():
                 from twitch_chat import TwitchChat
                 try:
                     self.twitch = TwitchChat(self.settings['twitch'], self.enqueue_twitch_message,
-                                             lambda text: self.post_control_event('log', text))
+                                             lambda text: self.post_control_event('log', text),
+                                             on_observation=self.observe_twitch_message)
                     self.twitch.start()
                 except ValueError as exc:
                     self.post_control_event('log', str(exc))
@@ -796,13 +817,24 @@ class VtuberAI:
         if kind == 'text':
             self.control_text.set('')
         self.control_status.set('處理中……')
-        self.conversation_jobs.put((kind, speaker, text))
+        self.conversation_jobs.put((kind, speaker, text, None, None))
 
-    def enqueue_twitch_message(self, speaker, text):
+    def observe_twitch_message(self, viewer_key, speaker, text, external_id=None, ignored=False):
+        """先永久保存所有收到的發言，包含忙碌與忽略名單中的訊息。"""
+        return self.audience_memory.record(viewer_key, speaker, text, 'twitch',
+                                           'ignored' if ignored else 'received', external_id)
+
+    def enqueue_twitch_message(self, speaker, text, viewer_key=None, message_id=None):
         """只在閒置時接收一則訊息，忙碌時略過，不累積待處理訊息。"""
         if self.stop.is_set() or not self.conversation_gate.acquire(blocking=False):
+            self.audience_memory.finish(message_id, 'skipped_busy')
             return False
-        self.conversation_jobs.put(('text', speaker, text))
+        try:
+            self.audience_memory.finish(message_id, 'accepted')
+            self.conversation_jobs.put(('text', speaker, text, viewer_key, message_id))
+        except Exception:
+            self.conversation_gate.release()
+            raise
         return True
 
     def update_control_window(self):
@@ -839,7 +871,7 @@ class VtuberAI:
         """所有推論與資料庫寫入依序執行，避免重複錄音或並行操作模型。"""
         while not self.stop.is_set():
             try:
-                kind, speaker, text = self.conversation_jobs.get(timeout=0.1)
+                kind, speaker, text, viewer_key, message_id = self.conversation_jobs.get(timeout=0.1)
             except queue.Empty:
                 continue
             try:
@@ -864,7 +896,7 @@ class VtuberAI:
                     break
                 self.post_control_event('log', f'{speaker}：{text}')
                 self.post_control_event('status', '白璃正在思考……')
-                reply = self.generate_reply(text, speaker)
+                reply = self.generate_reply(text, speaker, viewer_key=viewer_key, message_id=message_id)
                 self.post_control_event('log', f'白璃：{reply}')
                 if not self.stop.is_set():
                     self.post_control_event('status', '合成與播放語音中……')

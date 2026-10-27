@@ -22,10 +22,11 @@ def parse_line(line):
 
 
 class TwitchChat:
-    def __init__(self, settings, on_message, on_status):
+    def __init__(self, settings, on_message, on_status, on_observation=None):
         self.settings = settings
         self.on_message = on_message
         self.on_status = on_status
+        self.on_observation = on_observation
         self.stop_event = threading.Event()
         self.thread = None
         self.username = f'justinfan{secrets.randbelow(900000) + 100000}'
@@ -51,11 +52,20 @@ class TwitchChat:
             target, sep, text = params.partition(' :')
             sender = prefix.split('!', 1)[0]
             if (sep and text.strip() and target.lower() == f'#{self.channel}'
-                    and sender.lower() != self.username
-                    and sender.lower() not in {str(x).lower() for x in self.settings.get('ignored_users', [])}):
+                    and sender.lower() != self.username):
                 if text.startswith('\x01ACTION ') and text.endswith('\x01'):
                     text = text[8:-1]
-                self.on_message(tags.get('display-name') or sender, text)
+                speaker = tags.get('display-name') or sender
+                viewer_key = ('twitch:id:' + tags['user-id'] if tags.get('user-id')
+                              else 'twitch:login:' + sender.lower())
+                message_id = None
+                ignored = sender.lower() in {str(x).lower() for x in self.settings.get('ignored_users', [])}
+                if self.on_observation:
+                    message_id = self.on_observation(viewer_key, speaker, text, tags.get('id'), ignored)
+                    if message_id is None:
+                        return command, params
+                if not ignored:
+                    self.on_message(speaker, text, viewer_key, message_id)
         return command, params
 
     async def _listen(self):
