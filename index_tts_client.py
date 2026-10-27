@@ -12,6 +12,11 @@ class IndexTTSClient:
     def __init__(self, root, settings):
         self.root = Path(root)
         self.settings = settings
+        conversion = settings.get('text_conversion', 't2s')
+        self.text_converter = None
+        if conversion:
+            from opencc import OpenCC
+            self.text_converter = OpenCC(conversion)
         self.process = None
         self.log = None
         self.responses = queue.Queue()
@@ -76,7 +81,8 @@ class IndexTTSClient:
                 raise RuntimeError('Index-TTS 未啟動')
             output = Path(output).resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
-            request = {'text': text, 'output': str(output), 'reference': str(self.reference),
+            spoken_text = self.text_converter.convert(text) if self.text_converter else text
+            request = {'text': spoken_text, 'output': str(output), 'reference': str(self.reference),
                        'generation': self.settings.get('generation', {}), 'emo_vector': emo_vector}
             self.process.stdin.write(json.dumps(request, ensure_ascii=False) + '\n')
             self.process.stdin.flush()

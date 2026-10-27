@@ -187,6 +187,7 @@ tts:
     ignore_asterisks: true  # 移除 *內容* 與 **內容**
     ignore_angle_brackets: true  # 移除 <內容> 與全形尖括號內容
   engine: index-tts
+  text_conversion: t2s  # 僅送入語音模型的文字轉簡體；設為 null 關閉，顯示與紀錄保持原文
   root: index-tts
   python: .venv/Scripts/python.exe
   config_path: checkpoints/config.yaml
