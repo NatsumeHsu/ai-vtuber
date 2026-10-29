@@ -1,5 +1,6 @@
 """Index-TTS model hosted directly in the VTuber process."""
 from pathlib import Path
+import re
 import sys
 import threading
 
@@ -46,11 +47,16 @@ class IndexTTSClient:
                 raise RuntimeError('Index-TTS 已關閉')
             output = Path(output).resolve()
             output.parent.mkdir(parents=True, exist_ok=True)
-            spoken_text = self.text_converter.convert(text) if self.text_converter else text
+            generation = dict(self.settings.get('generation', {}))
+            # Kana identifies Japanese; preserve its kanji instead of applying OpenCC.
+            japanese = bool(re.search(r'[\u3040-\u309f\u30a0-\u30ff]', text))
+            spoken_text = self.text_converter.convert(text) if self.text_converter and not japanese else text
+            if japanese:
+                generation['lang'] = 'JA'
             self.model.infer(
                 spk_audio_prompt=str(self.reference), text=spoken_text,
                 output_path=str(output), emo_vector=emo_vector, verbose=False,
-                **self.settings.get('generation', {}))
+                **generation)
 
     def close(self):
         # Wait for active inference before releasing its model.

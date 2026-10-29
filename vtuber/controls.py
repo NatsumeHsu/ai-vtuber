@@ -19,7 +19,7 @@ class ControlsMixin:
 
         window = self.control_window = tk.Tk()
         window.title('白璃｜麥克風對話控制')
-        window.geometry('620x560')
+        window.geometry('620x640')
         window.minsize(480, 400)
         window.protocol('WM_DELETE_WINDOW', self.stop.set)
         frame = ttk.Frame(window, padding=16)
@@ -28,6 +28,15 @@ class ControlsMixin:
         self.control_speaker = tk.StringVar(value=self.speaker_name)
         ttk.Label(frame, text='麥克風對話控制', font=('', 16, 'bold')).pack(anchor='w')
         ttk.Label(frame, textvariable=self.control_status).pack(anchor='w', pady=(8, 12))
+        services = ttk.LabelFrame(frame, text='子程序控制', padding=6)
+        services.pack(fill='x', pady=(0, 8))
+        for kind, label in (('discord', 'Discord'), ('twitch', 'Twitch'), ('text', '文字生成'), ('speech', '語音生成')):
+            service_row = ttk.Frame(services)
+            service_row.pack(fill='x')
+            ttk.Label(service_row, text=label, width=12).pack(side='left')
+            for action, title in (('stop', '停止'), ('start', '啟動'), ('restart', '重啟')):
+                ttk.Button(service_row, text=title,
+                           command=lambda k=kind, a=action: self.control_service(k, a)).pack(side='left', padx=3)
         self.camera_status = tk.StringVar(value='眼睛追蹤：啟動中' if self.live2d_settings.get('camera_tracking', {}).get('enabled', False) else '眼睛追蹤：未啟用')
         ttk.Label(frame, textvariable=self.camera_status).pack(anchor='w', pady=(0, 8))
         self.gesture_status = tk.StringVar(value='手勢：等待攝影機啟動')

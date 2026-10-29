@@ -14,7 +14,9 @@ IndexTTS 上游的 NumPy/OpenCV 版本限制以本專案相容版本取代；
 不要在 index-tts 執行 uv sync。
 llama-cpp-python 0.3.36 使用官方 CUDA 13.0 wheel，並安裝獨立 CUDA 13 執行庫；
 PyTorch 保持 CUDA 12.8，兩套原生執行庫使用不同 DLL 名稱。
-LLM、ASR、Index-TTS、Live2D 與攝影機均在同一個 Python process 執行，使用執行緒維持介面回應，TTS 模型只載入一次。
+主程序保留控制視窗、Live2D、攝影機、ASR、資料庫與對話排程，另啟動四個獨立 Python 子程序：Twitch、Discord、文字生成（LLM），以及語音生成（Index-TTS）。程序間使用私有 pipe 通訊，不開放網路服務。
+控制視窗的「子程序控制」可分別停止、啟動或重啟這四個模組。先停止對應模組，修改並儲存程式或設定檔，再按「啟動」；新子程序會重新匯入程式及載入設定／模型，不必關閉 Live2D。修改主程序的介面、ASR、排程或資料庫程式仍需重啟整個應用程式。
+停止會取消該子程序尚未完成的請求；已保存的對話保留，不自動重播或重送失敗請求。停止 Discord 或 Twitch 期間，僅該平台不會接收新訊息；另一平台不受影響。重啟時僅重新連線對應平台，修改 Discord 收音啟用狀態若需要首次載入 ASR，仍需重啟整個應用程式。
 攝影機改用 OpenCV DirectShow，不再啟動 FFmpeg process。
 
 `setup.bat -CheckOnly` 可驗證環境、GPU 與模型檔案。
@@ -108,7 +110,7 @@ Twitch 使用平台 `user-id`，缺少時使用登入帳號，不以顯示暱稱
 | `vtuber/virtual_camera.py` | DirectShow 攝影機擷取 |
 | `vtuber/runtime_support.py` | Windows CUDA 動態函式庫路徑準備 |
 
-主程式由各功能的 mixin 組成，共用同一個 `VtuberAI` 實例；模型、資料庫路徑及停止事件皆屬於該實例，不使用全域應用程式物件。介面與 Live2D 仍在主執行緒更新。對話回覆依序處理，Discord 另有收音與辨識工作執行緒；ASR、LLM、TTS 透過 model_lock 序列化模型操作。音訊播放不占用模型鎖，因此播放當輪回覆時仍可辨識下一段語音。模型只在啟動流程載入，匯入套件不會啟動攝影機、開視窗或載入模型。
+主程式由各功能的 mixin 組成，介面與 Live2D 在主執行緒更新。對話回覆依序處理；社群子程序透過 IPC 將收音送到主程序的 ASR，並將文字訊息交給既有排程。LLM（含名字校正、人際記憶與情緒分析）由文字生成子程序持有，Index-TTS 由語音生成子程序持有。匯入套件不會啟動攝影機、開視窗或載入模型；子程序啟動時才載入對應模型。
 
 不使用硬體的功能測試：`.venv/Scripts/python.exe -X utf8 scripts/test_modular_app.py`。
 語音情緒與繁簡轉換測試：`.venv/Scripts/python.exe -X utf8 scripts/test_emotion_middleware.py`。

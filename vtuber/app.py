@@ -62,25 +62,81 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
     def initialize_models(self):
         from .runtime_support import prepare_runtime
         prepare_runtime()
-        from .index_tts_client import IndexTTSClient
-        from llama_cpp import Llama, llama_supports_gpu_offload
-        if self.n_gpu_layers != 0 and not llama_supports_gpu_offload():
-            raise RuntimeError('目前的 llama-cpp-python 沒有 GPU 加速支援')
-        if not self.project_path(self.gguf_model).is_file():
-            raise FileNotFoundError(self.project_path(self.gguf_model))
+        from .process_runtime import ServiceProcess, ModelProxy, DiscordProxy
+        self.services = {
+            kind: ServiceProcess(kind, self.root, self.settings_path, self.service_callback)
+            for kind in ('text', 'speech', 'discord', 'twitch')}
+        for kind in ('text', 'speech'):
+            if self.stop.is_set():
+                return
+            self.services[kind].start()
+            self.services[kind].call('ready')
+        self.llm = ModelProxy(self.services['text'])
+        self.tts = ModelProxy(self.services['speech'])
         needs_asr = self.asr_settings['enabled'] or self.settings.get('discord', {}).get('enabled', False)
         self.recognizer, self.converter = self.init_asr() if needs_asr else (None, None)
         if self.stop.is_set():
             return
-        print('載入 Index-TTS……')
-        self.tts = IndexTTSClient(self.root, self.tts_settings)
-        if self.stop.is_set():
-            self.tts.close()
-            return
-        print('載入 GGUF……')
-        self.llm = Llama(model_path=str(self.project_path(self.gguf_model)), n_gpu_layers=self.n_gpu_layers, n_ctx=self.n_ctx, verbose=self.llm_settings['verbose'])
+        for kind in ('discord', 'twitch'):
+            if self.stop.is_set():
+                return
+            self.services[kind].start()
+            try:
+                self.services[kind].call('ready')
+            except RuntimeError as exc:
+                self.post_control_event('error', str(exc))
+        if self.settings.get('discord', {}).get('enabled', False):
+            self.discord = DiscordProxy(self.services['discord'])
         self.output = self.project_path(self.output_path)
         self.output.parent.mkdir(parents=True, exist_ok=True)
+
+    def service_callback(self, method, *args, **kwargs):
+        callbacks = {
+            'observe': self.observe_twitch_message,
+            'twitch_message': self.enqueue_twitch_message,
+            'discord_message': self.enqueue_discord_message,
+            'transcribe': self.recognize_samples,
+            'log': lambda text: self.post_control_event('log', text),
+            'mouth': lambda level: setattr(self, 'mouth', min(1.0, level * self.mouth_gain)),
+        }
+        if self.stop.is_set():
+            return None
+        return callbacks[method](*args, **kwargs)
+
+    def control_service(self, kind, action):
+        if not hasattr(self, 'services') or self.stop.is_set():
+            self.post_control_event('error', '子程序尚未準備完成')
+            return
+        def work():
+            try:
+                service = self.services[kind]
+                with service.control_lock:
+                    if action in ('stop', 'restart'):
+                        service.close()
+                    if action in ('start', 'restart') and not self.stop.is_set():
+                        service.start()
+                        pid = service.call('ready')
+                        fresh = self.load_settings()
+                        if kind == 'text':
+                            self.system_prompt = fresh['chat']['system_prompt']
+                            self.temperature = fresh['llm']['temperature']
+                            self.max_tokens = fresh['llm']['max_tokens']
+                            self.n_ctx = fresh['llm']['n_ctx']
+                            self.history_turns = fresh['chat']['history_turns']
+                        elif kind == 'speech':
+                            self.tts_settings = fresh['tts']
+                        elif kind == 'discord':
+                            from .process_runtime import DiscordProxy
+                            self.settings['discord'] = fresh.get('discord', {})
+                            self.discord = DiscordProxy(service) if self.settings['discord'].get('enabled') else None
+                        elif kind == 'twitch':
+                            self.settings['twitch'] = fresh.get('twitch', {})
+                        self.post_control_event('log', f'{kind} 已啟動，PID {pid}')
+                    else:
+                        self.post_control_event('log', f'{kind} 已停止，可修改程式後啟動')
+            except Exception as exc:
+                self.post_control_event('error', str(exc))
+        threading.Thread(target=work, daemon=True).start()
 
     def close(self):
         self.stop.set()
@@ -90,6 +146,8 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
         if self.twitch is not None:
             self.twitch.close()
             self.twitch = None
+        for service in getattr(self, 'services', {}).values():
+            service.close()
         with self.model_lock:
             tts, self.tts = self.tts, None
             try:
@@ -109,23 +167,6 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
             if not self.stop.is_set():
                 self.audience_memory.analyze_startup(self.llm, self.n_ctx, self.stop,
                                                      lambda text: self.post_control_event('status', text))
-            if self.settings.get('twitch', {}).get('enabled', False) and not self.stop.is_set():
-                from .twitch_chat import TwitchChat
-                try:
-                    self.twitch = TwitchChat(self.settings['twitch'], self.enqueue_twitch_message,
-                                             lambda text: self.post_control_event('log', text),
-                                             on_observation=self.observe_twitch_message)
-                    self.twitch.start()
-                except ValueError as exc:
-                    self.post_control_event('log', str(exc))
-            if self.settings.get('discord', {}).get('enabled', False) and not self.stop.is_set():
-                from .discord_voice import DiscordVoiceService
-                try:
-                    self.discord = DiscordVoiceService(self.settings['discord'], self.recognize_samples,
-                        self.enqueue_discord_message, lambda text: self.post_control_event('log', text))
-                    self.discord.start()
-                except (ValueError, ImportError) as exc:
-                    self.post_control_event('log', str(exc))
             self.post_control_event('ready', None)
             self.conversation_loop()
         except Exception as exc:
