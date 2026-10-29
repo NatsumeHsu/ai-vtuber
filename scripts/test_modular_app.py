@@ -30,7 +30,7 @@ class ModularAppTests(unittest.TestCase):
 
     def test_legacy_entry_starts_same_application(self):
         self.assertIs(vtuberAI.VtuberAI, VtuberAI)
-        with patch.object(VtuberAI, 'run') as run:
+        with patch('vtuber.discord_host.DiscordHost.run') as run:
             runpy.run_path(str(ROOT / 'vtuberAI.py'), run_name='__main__')
         run.assert_called_once()
 

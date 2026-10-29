@@ -14,10 +14,84 @@ IndexTTS 上游的 NumPy/OpenCV 版本限制以本專案相容版本取代；
 不要在 index-tts 執行 uv sync。
 llama-cpp-python 0.3.36 使用官方 CUDA 13.0 wheel，並安裝獨立 CUDA 13 執行庫；
 PyTorch 保持 CUDA 12.8，兩套原生執行庫使用不同 DLL 名稱。
-主程序保留控制視窗、Live2D、攝影機、ASR、資料庫與對話排程，另啟動四個獨立 Python 子程序：Twitch、Discord、文字生成（LLM），以及語音生成（Index-TTS）。程序間使用私有 pipe 通訊，不開放網路服務。
-控制視窗的「子程序控制」可分別停止、啟動或重啟這四個模組。先停止對應模組，修改並儲存程式或設定檔，再按「啟動」；新子程序會重新匯入程式及載入設定／模型，不必關閉 Live2D。修改主程序的介面、ASR、排程或資料庫程式仍需重啟整個應用程式。
-停止會取消該子程序尚未完成的請求；已保存的對話保留，不自動重播或重送失敗請求。停止 Discord 或 Twitch 期間，僅該平台不會接收新訊息；另一平台不受影響。重啟時僅重新連線對應平台，修改 Discord 收音啟用狀態若需要首次載入 ASR，仍需重啟整個應用程式。
+`vtuberAI.py` 以 Discord 機器人為主服務：主程序持有 Discord 連線與指令，啟動桌面子程序（控制介面、Live2D、攝影機、ASR、資料庫及排程），桌面子程序再管理 Twitch、文字生成（LLM）與語音生成（Index-TTS）子程序。程序間使用私有 pipe 通訊，不開放網路服務。
+控制視窗可分別停止、啟動或重啟 Twitch、文字生成與語音生成；停止後儲存程式修改，再按啟動即可重新載入。重啟這些模組不會重新登入 Discord。修改 Discord 主服務、桌面介面、ASR 或排程則需整體重啟。
+停止會取消該子程序尚未完成的請求；已保存的對話保留，不自動重播或重送失敗請求。停止 Twitch 不影響 Discord 連線。AI 尚未載入完成時收到的 Discord 語音不會排入回覆；關閉桌面視窗會結束整個服務。
 攝影機改用 OpenCV DirectShow，不再啟動 FFmpeg process。
+
+### 啟動與頻道控制
+
+雙擊 `start.bat`，或在專案目錄執行 `.\.venv\Scripts\python.exe -X utf8 .\vtuberAI.py`。
+控制視窗的「頻道設定」可更新 Discord 語音頻道 ID 與 Twitch 頻道名稱。Discord 頻道僅用於本次執行，不存入設定；Twitch 頻道會寫回本機 `setting.yml`。Discord 頻道必須屬於設定中的 `guild_id`，且為普通語音頻道；切換時會中斷正在播放的 Discord 音訊。Twitch 更新後只重啟 Twitch 子程序，`enabled` 開關保持原設定。
+
+Discord 指令白名單預設為空，沒有任何人可使用切換指令。先在本機以指令加入使用者 ID，再啟動服務：
+
+```powershell
+cd D:\AI\ai-vtuber
+.\.venv\Scripts\python.exe -X utf8 .\vtuberAI.py --allow-discord-user 你的Discord使用者ID
+.\.venv\Scripts\python.exe -X utf8 .\vtuberAI.py
+```
+
+`--allow-discord-user` 可重複指定多個 ID，設定儲存後程式會離開。`--clear-discord-users` 可清空白名單；修改名單後需重啟主服務。請替換上述 ID 佔位文字為數字。
+
+儲存 `setting.yml` 後，可按控制視窗的「重新載入設定」，或由白名單使用者執行 `/reload`。程式先檢查設定格式，再重啟桌面與所有功能子程序、重新建立 Discord 連線，讓模型、ASR、Live2D、Twitch、歡迎訊息、文字回覆與白名單等設定套用。進行中的工作會中斷，模型需要重新載入。伺服器未改變時會保留本次語音目標並重新連線。
+重新載入固定保留目前使用的 `bot_token`，不會將它寫回或覆蓋設定檔內修改的 token；若要改用新 token，請結束整個程式後重新啟動。訊息「子程序正在重新載入模型」只表示已開始重新啟動，不代表模型已載入完成。
+白名單使用者可先加入普通語音頻道，再於已設定的 Discord 伺服器使用 `/join`，機器人會加入該使用者所在的頻道，不需提供參數。非白名單使用者、其他伺服器與私訊皆無切換權限。機器人邀請需包含 `applications.commands` scope，並具備目標頻道的檢視頻道、連線及說話權限。
+
+### Discord 基本伺服器指令
+
+| 指令 | 功能 | 權限 |
+| --- | --- | --- |
+| `/help` | 查看指令說明 | 已設定伺服器的成員 |
+| `/ping` | Discord 心跳延遲 | 已設定伺服器的成員 |
+| `/status` | 服務運行時間、語音連線、自動加入與待辨識片段數 | 已設定伺服器的成員 |
+| `/serverinfo` | 伺服器名稱、ID、成員數與頻道數 | 已設定伺服器的成員 |
+| `/userinfo [member]` | 自己或指定成員的名稱、ID、加入時間 | 已設定伺服器的成員 |
+| `/roll [dice]` | 擲骰，預設 `1d6`，例如 `2d20` | 已設定伺服器的成員 |
+| `/choose options` | 隨機抽一個選項，例如 `咖啡｜茶｜果汁` | 已設定伺服器的成員 |
+| `/poll question options [hours] [multiple]` | Discord 原生投票，選項用 `｜` 分隔，預設 24 小時、單選 | 成員與機器人皆需建立投票權限 |
+| `/avatar [member]` | 查看自己或指定成員的頭像 | 已設定伺服器的成員 |
+| `/join` | 加入下指令者所在的語音頻道，開啟自動加入 | 本機 ID 白名單 |
+| `/leave` | 離開語音、清除未辨識音訊並關閉自動加入 | 本機 ID 白名單 |
+| `/reload` | 重新讀取設定，保留目前登入的 bot_token | 本機 ID 白名單 |
+
+`/roll`、`/choose` 的結果與 `/poll` 投票公開顯示在下指令的頻道，其餘指令及錯誤回覆只對使用者本人顯示。擲骰限制 1～20 顆、每顆 2～1000 面；抽籤限制 2～20 個不同選項；投票限制 2～10 個不同選項、1～168 小時，`multiple: true` 可複選。投票由 Discord 保存，機器人重啟後仍可使用。
+`/leave` 會將 `discord.auto_join: false` 寫回設定，重開程式也不會自動進入語音；`/join` 或介面更新 Discord 頻道時會重新開啟。此設定不影響機器人登入或一般指令。`/status` 顯示 Discord 服務狀態，不代表 AI 模型已完成載入。
+更新指令程式後需重啟整個服務，登入後會註冊全域指令，再清除設定伺服器內舊的限定指令以避免重複顯示；完成後重新連線不會重複同步。全域註冊不改變既有權限：仍只允許在設定的伺服器執行，語音控制仍需 ID 白名單。
+
+### 新成員歡迎訊息
+
+在本機 `setting.yml` 的 `discord.member_services` 設定：
+
+```yaml
+  member_services:
+    welcome_channel_id: 0
+    ignore_bots: true
+    welcome_message: '歡迎 {mention} 加入 {server}！目前有 {member_count} 位成員。'
+```
+
+`welcome_channel_id` 填入設定伺服器內的文字頻道 ID；`0` 表示關閉歡迎訊息。訊息可使用 `{user}`、`{mention}`、`{user_id}`、`{server}`、`{member_count}`；通知停用實際提及，因此不會發出 @everyone、身分組或使用者提示。
+
+設定歡迎頻道後，程式會啟用 Members intent；請先到 Discord Developer Portal → Bot → Privileged Gateway Intents 開啟 **Server Members Intent**，再重啟服務。歡迎頻道需要檢視及傳送訊息權限。
+
+預設略過其他機器人，只歡迎新加入的成員，不回溯補發訊息。傳送失敗會記錄於本機控制視窗。
+
+### Discord 文字頻道隨機回覆
+
+`discord.text_replies` 控制指定 `guild_id` 伺服器的文字頻道回覆：
+
+```yaml
+  text_replies:
+    enabled: true
+    probability: 0.025
+    context_messages: 10
+```
+
+每則非機器人、非 Webhook、非空白且不以 `/` 開頭的文字訊息，獨立以 2.5% 機率觸發。只處理普通文字頻道，不處理私訊、討論串或其他伺服器。文字生成子程序未就緒或已停止時不擷取上下文、不回覆；忙碌時存檔並標記 `skipped_busy`，不排隊，Discord 語音仍保有原本的優先順序。
+
+觸發後擷取當則訊息之前最近 10 則頻道訊息（不足則取現有訊息），依舊到新排列並連同當則訊息存入原本 SQLite 的 `discord_text_contexts` 表；保留訊息與發言者 ID、名稱、文字、時間，以及回覆與傳送狀態。相同觸發訊息 ID 不會重複處理。模型只使用該頻道上下文，不混入其他頻道或語音的短期對話；模型容量不足時從最舊的上下文開始移除，資料庫仍保留完整擷取內容。
+
+生成結果以文字回覆原訊息，不合成語音、不觸發提及通知。請在 Developer Portal 開啟 **Message Content Intent**，並給予機器人檢視頻道、讀取訊息歷史與傳送訊息權限，再重啟服務。關閉 `text_replies.enabled` 可停用此功能及 Message Content intent。
 
 `setup.bat -CheckOnly` 可驗證環境、GPU 與模型檔案。
 既有模型和 FFmpeg 必須保留；安裝器不再下載 GPT-SoVITS 模型。
@@ -60,11 +134,17 @@ setting.yml 保留原本的 live2d、llm、chat、asr 與 output 設定。
 # Twitch 聊天輸入
 
 主程式讀取根目錄的本機 `setting.yml`。
-本機 `setting.yml` 已排除 Git。首次設定可複製 `example.yml` 為 `setting.yml`，先調整模型、參考音檔與攝影機設定，再設定 `twitch.enabled: true`，填寫 `channel`（Twitch 頻道帳號），即可匿名連線 IRC，不需要 Token 或登入帳號。不再讀取 Node 專案的 `.env`。
+`vtuber/twitch_chat.py` 統一管理 Twitch 服務的啟動、停止、專案回呼、雙帳號 OAuth、EventSub 收訊、指令與關鍵字回覆。由原本 Twitch 服務啟動，不需要 Node.js 或 `.env`，不再使用 IRC 或 `mode` 設定。
+
+在本機 `setting.yml` 的 `twitch` 分類填入 `enabled: true`、`channel`、`client_id`、`client_secret`、`redirect_uri: http://localhost:3000/callback`。Twitch Developer Console 必須登記相同回呼網址。也可透過環境變數 `TWITCH_CLIENT_ID`、`TWITCH_CLIENT_SECRET` 提供憑證。請勿將密鑰放入公開範本。
+
+照常執行 `start.bat`，依控制視窗日誌的網址先以 Bot 帳號授權，再以實況主帳號授權，各限時五分鐘。兩者必須不同，實況主必須符合 `channel`。授權保存在 `data/tokens.json`（已排除 Git），相容原 TypeScript 的毫秒到期時間格式，支援自動更新。換帳號時先停止 Twitch，再移除授權檔中該角色的項目並重新啟動。
+
+`data/commands.json` 每則訊息重新讀取，支援 `commands` 的 `response`、`role`（`everyone`、`moderator`、`broadcaster`）與 `keywords`。`prefix` 預設 `!`；回覆支援 `{user}`、`{args}`，以 Bot 帳號引用原訊息送出。`tokens_file`、`commands_file` 可指定相對專案根目錄的路徑。忽略 Bot 自己與 `ignored_users` 的訊息，通知重送會去重。
 
 啟動原本的 `start.bat` 即可。模型載入完成後自動連線，閒置時接受一則聊天室訊息，觀眾名稱與訊息會進入主程式文字對話流程，並保留於原本的對話紀錄。從接受訊息到回覆生成、語音合成及播放完成期間，新聊天室訊息只存檔、不回覆、不排隊、不補讀；手動輸入或錄音處理中也採相同方式。完成後接受下一則新訊息。略過 `twitch.ignored_users` 名單，斷線按 `reconnect_seconds` 自動重連。
 
-聊天室連線在處理期間維持運作並回應 PING，當時的新訊息仍會存檔，但不安排回覆，避免完成後處理積壓的舊訊息。透過 TLS 直接連線 `irc.chat.twitch.tv:6697`，斷線後自動重連。此整合只讀取聊天並在本機回覆，不會傳送訊息到 Twitch，也不包含原 Node 專案的點歌或 OBS 網頁。
+EventSub 會處理 keepalive 逾時、斷線重連與伺服器要求的連線轉移；停止／重啟 Twitch 時也會結束 OAuth 等待與 WebSocket。指令與關鍵字固定回覆獨立執行，AI 忙碌時仍只存檔、不排隊。AI 生成的文字與語音沿用原本輸出流程。
 
 # 觀眾發言與人際關係記憶
 
@@ -104,7 +184,7 @@ Twitch 使用平台 `user-id`，缺少時使用登入帳號，不以顯示暱稱
 | `vtuber/audience_memory.py` | 觀眾發言封存及人際關係摘要 |
 | `vtuber/emotion_middleware.py` | 語音情緒分析 |
 | `vtuber/index_tts_client.py` | IndexTTS 介接及語音輸入繁簡轉換 |
-| `vtuber/twitch_chat.py` | 匿名 IRC 連線與訊息解析 |
+| `vtuber/twitch_chat.py` | Twitch 生命週期、OAuth、EventSub、指令與關鍵字回覆 |
 | `vtuber/discord_voice.py` | Discord 雙向語音、分段辨識、音訊轉換與播放 |
 | `vtuber/hand_gestures.py` | 手部關節與手勢判定 |
 | `vtuber/virtual_camera.py` | DirectShow 攝影機擷取 |
@@ -120,15 +200,15 @@ Twitch 使用平台 `user-id`，缺少時使用登入帳號，不以顯示暱稱
 
 在 Discord Developer Portal 建立應用程式與 Bot，將 Bot 邀請到伺服器，授予指定語音頻道的「查看頻道」「連線」「說話」權限。開啟 Discord 的開發者模式，複製伺服器與普通語音頻道 ID。此功能使用 Bot 帳號，不能像 Twitch 匿名登入，也不要填入一般使用者 Token；不需要 Message Content 或 Members 特權 Intent。
 
-在本機 `setting.yml` 的 `discord` 區塊填寫 `bot_token`、`guild_id`、`voice_channel_id`，再設定 `enabled: true` 並重新啟動。範本 `example.yml` 的 Token 保持空白；本機設定已被 Git 排除，請勿將 Token 填入共用範本。尚未設定時預設停用，不影響 Twitch 與本機對話。支援普通語音頻道，尚不支援 Stage 頻道。
+Discord 是固定啟用的主服務，不再使用 `discord.enabled`。在本機 `setting.yml` 的 `discord` 區塊填寫 `bot_token`、`guild_id` 後啟動；缺少登入設定會報錯。啟動後等待白名單使用者以 `/join` 或介面選擇語音頻道，不保存上次的語音頻道。範本 `example.yml` 的 Token 保持空白；本機設定已被 Git 排除，請勿將 Token 填入共用範本。支援普通語音頻道，尚不支援 Stage 頻道。
 
-啟動後，Bot 自動進入指定頻道，依 Discord 使用者 ID 分開收音，忽略其他 Bot 的音訊。成員停頓後，使用既有 SenseVoice 模型辨識成繁體中文，存入原本的觀眾資料庫，再進入優先佇列。語音訊息可在忙碌時排隊，待當輪「回覆生成、語音生成與播放」完成後，先依收到的辨識結果順序處理語音，再處理一般文字；不會中斷當輪。Twitch 訊息仍維持忙碌時只存檔、不安排回覆。Discord、Twitch、手動輸入使用不同的身分鍵，不會只憑相同暱稱合併為同一人。
+使用 /join 或介面加入語音頻道後，依 Discord 使用者 ID 分開收音，忽略其他 Bot 的音訊。成員停頓後，使用既有 SenseVoice 模型辨識成繁體中文，存入原本的觀眾資料庫，再進入優先佇列。語音訊息可在忙碌時排隊，待當輪「回覆生成、語音生成與播放」完成後，先依收到的辨識結果順序處理語音，再處理一般文字；不會中斷當輪。Twitch 訊息仍維持忙碌時只存檔、不安排回覆。Discord、Twitch、手動輸入使用不同的身分鍵，不會只憑相同暱稱合併為同一人。
 
 Discord 語音回覆使用現有角色與人際記憶、情緒分析、IndexTTS 和繁簡轉換。產生的音訊會在記憶體轉為 Discord 所需的 48 kHz 雙聲道 PCM，再由 Opus 傳送；不另啟動 FFmpeg。Live2D 嘴型會隨 Discord 的音訊播放更新。Discord 回覆預設不在本機喇叭重播；`local_playback: true` 可額外在本機播放（在 Discord 播放完成後）。本機與 Twitch 回覆仍播放到原本的音訊輸出。即使關閉麥克風的 `asr.enabled`，啟用 Discord 後仍會載入同一份 ASR 模型供 Discord 使用。
 
 `discord` 分類的參數：
 
-- `enabled`、`bot_token`、`guild_id`、`voice_channel_id`：功能開關與 Bot 連線設定。
+- `enabled`、`bot_token`、`guild_id`：功能開關與 Bot 連線設定。
 - `local_playback`：是否額外在本機播放 Discord 回覆，預設 false。
 - `speech_threshold`：判定說話的音量門檻。
 - `silence_seconds`：停頓多久後送去辨識。

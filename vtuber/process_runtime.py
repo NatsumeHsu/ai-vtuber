@@ -145,7 +145,7 @@ def service_main(connection, kind, root, settings_path):
                         on_observation=lambda *a: peer.call('observe', *a))
                     resources.append(twitch)
                     twitch.start()
-                if kind == 'discord' and settings.get('discord', {}).get('enabled', False):
+                if kind == 'discord':
                     from .discord_voice import DiscordVoiceService
                     discord = DiscordVoiceService(settings['discord'],
                         lambda samples: peer.call('transcribe', samples),
@@ -172,6 +172,7 @@ class ServiceProcess:
         self.lifecycle_lock = threading.Lock()
         self.control_lock = threading.Lock()
         self.process = self.peer = None
+        self.ready = False
 
     def start(self):
         with self.lifecycle_lock:
@@ -183,6 +184,7 @@ class ServiceProcess:
                 self.process.join()
                 self.process.close()
             context = mp.get_context('spawn')
+            self.ready = False
             parent, child = context.Pipe()
             self.process = context.Process(target=service_main,
                 args=(child, self.kind, self.root, self.settings_path), name='vtuber-' + self.kind)
@@ -194,12 +196,16 @@ class ServiceProcess:
         peer = self.peer
         if peer is None:
             raise RuntimeError(f'{self.kind} 子程序尚未啟動')
-        return peer.call(method, *args, **kwargs)
+        result = peer.call(method, *args, **kwargs)
+        if method == 'ready':
+            self.ready = True
+        return result
 
     def close(self):
         with self.lifecycle_lock:
             process, peer = self.process, self.peer
             self.peer = self.process = None
+            self.ready = False
             if peer:
                 try:
                     peer.send(('call', -1, 'shutdown', (), {}))

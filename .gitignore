@@ -181,3 +181,7 @@ $RECYCLE.BIN/
 TEMP-env-backup-*/
 /index-tts/
 /work/
+
+# Twitch OAuth credentials
+/data/tokens.json
+/data/tokens.tmp

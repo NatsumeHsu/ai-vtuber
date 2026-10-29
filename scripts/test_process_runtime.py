@@ -10,28 +10,23 @@ from vtuber.process_runtime import Peer, ServiceProcess
 
 
 class ProcessTests(unittest.TestCase):
-    def test_invalid_twitch_settings_do_not_break_discord(self):
+    def test_discord_always_requires_credentials(self):
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / 'settings.yml'
-            config.write_text('twitch: {enabled: true, channel: "!!!"}\ndiscord: {enabled: false}\n', encoding='utf-8')
-            discord = ServiceProcess('discord', folder, config, lambda *a: None)
-            twitch = ServiceProcess('twitch', folder, config, lambda *a: None)
+            config.write_text('discord: {enabled: false}\n', encoding='utf-8')
+            service = ServiceProcess('discord', folder, config, lambda *a: None)
             try:
-                discord.start()
-                pid = discord.call('ready')
-                twitch.start()
-                with self.assertRaisesRegex(RuntimeError, 'Twitch'):
-                    twitch.call('ready')
-                self.assertEqual(discord.call('ready'), pid)
+                service.start()
+                with self.assertRaisesRegex(RuntimeError, 'bot_token'):
+                    service.call('ready')
             finally:
-                discord.close()
-                twitch.close()
+                service.close()
 
     def test_stopping_one_service_keeps_other_alive(self):
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / 'settings.yml'
             config.write_text('twitch: {enabled: false}\ndiscord: {enabled: false}\n', encoding='utf-8')
-            first = ServiceProcess('discord', folder, config, lambda *a: None)
+            first = ServiceProcess('twitch', folder, config, lambda *a: None)
             second = ServiceProcess('twitch', folder, config, lambda *a: None)
             try:
                 first.start()

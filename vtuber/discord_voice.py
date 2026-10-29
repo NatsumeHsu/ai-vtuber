@@ -91,9 +91,9 @@ class DiscordVoiceService:
         self.settings = settings
         self.token = str(settings.get('bot_token', '')).strip()
         self.guild_id = int(settings.get('guild_id', 0))
-        self.channel_id = int(settings.get('voice_channel_id', 0))
-        if not self.token or min(self.guild_id, self.channel_id) <= 0:
-            raise ValueError('請在 setting.yml 的 discord 填入 bot_token、guild_id 與 voice_channel_id')
+        self.channel_id = None
+        if not self.token or self.guild_id <= 0:
+            raise ValueError('請在 setting.yml 的 discord 填入 bot_token 與 guild_id')
         self.transcribe = transcribe
         self.on_transcript = on_transcript
         self.on_status = on_status
@@ -102,6 +102,63 @@ class DiscordVoiceService:
         self.stop_event = threading.Event()
         self.loop = self.shutdown = self.voice = self.client = None
         self.thread = self.asr_thread = None
+        self.on_channel_changed = lambda channel_id: None
+        self.channel_lock = None
+        self.started_at = time.monotonic()
+        self.voice_enabled = False  # Wait for /join or the desktop channel selector.
+        self.on_voice_enabled_changed = lambda enabled: None
+        self.voice_epoch = 0
+        self.text_ready = lambda: False
+        self.on_text_message = lambda payload: False
+        self.reload_settings = lambda: False
+
+    def clear_voice_input(self):
+        self.voice_epoch += 1
+        with self.buffer.lock:
+            self.buffer.turns.clear()
+        while True:
+            try:
+                self.audio_jobs.get_nowait()
+                self.audio_jobs.task_done()
+            except queue.Empty:
+                break
+
+    async def leave_channel(self):
+        async with self.channel_lock:
+            # Disable before disconnecting so the maintenance loop cannot rejoin.
+            self.voice_enabled = False
+            self.settings['auto_join'] = False
+            self.clear_voice_input()
+            if self.voice is not None:
+                await self.voice.disconnect(force=True)
+                self.voice = None
+            await asyncio.to_thread(self.on_voice_enabled_changed, False)
+        self.on_status('Discord 已離開語音，自動加入已關閉')
+
+    def command_allowed(self, user_id, guild_id):
+        return (guild_id == self.guild_id and int(user_id) in
+                {int(value) for value in self.settings.get('allowed_user_ids', [])})
+
+    async def change_channel(self, channel_id):
+        import discord
+        if self.client is None or not self.client.is_ready():
+            raise RuntimeError('Discord 尚未登入完成')
+        channel = self.client.get_channel(int(channel_id)) or await self.client.fetch_channel(int(channel_id))
+        if not isinstance(channel, discord.VoiceChannel) or channel.guild.id != self.guild_id:
+            raise ValueError('請指定已設定伺服器內的普通語音頻道')
+        async with self.channel_lock:
+            if self.voice is not None and self.voice.is_connected():
+                if self.voice.is_playing():
+                    self.voice.stop_playing()
+                await self.voice.move_to(channel)
+            self.channel_id = channel.id
+            self.voice_enabled = True
+            self.settings['auto_join'] = True
+            self.clear_voice_input()
+            await asyncio.to_thread(self.on_channel_changed, channel.id)
+            await asyncio.to_thread(self.on_voice_enabled_changed, True)
+        self.on_status(f'Discord 語音目標已更新：{channel.id}')
+        return channel.id
 
     def start(self):
         # Fail before creating threads if the pinned voice receive dependency is missing.
@@ -131,8 +188,9 @@ class DiscordVoiceService:
             except queue.Empty:
                 continue
             try:
+                epoch = self.voice_epoch
                 text = self.transcribe(to_asr_samples(pcm)).strip()
-                if text and not self.stop_event.is_set():
+                if text and not self.stop_event.is_set() and self.voice_enabled and epoch == self.voice_epoch:
                     self.on_transcript(user_id, speaker, text)
             except Exception:
                 self.on_status('Discord 語音辨識失敗，此段未加入回覆佇列')
@@ -148,15 +206,29 @@ class DiscordVoiceService:
         finally:
             self.stop_event.set()
 
+    def register_commands(self):
+        from .discord_commands import register_commands
+        return register_commands(self)
+
     async def _serve(self):
         import discord
         from discord.ext import voice_recv
         self.loop = asyncio.get_running_loop()
         self.shutdown = asyncio.Event()
+        self.channel_lock = asyncio.Lock()
         intents = discord.Intents.none()
         intents.guilds = intents.voice_states = True
+        from .discord_members import MemberServices
+        member_services = MemberServices(self)
+        intents.members = member_services.enabled
+        from .discord_text import TextReplies
+        text_replies = TextReplies(self)
+        intents.guild_messages = intents.message_content = text_replies.enabled
         self.client = discord.Client(intents=intents)
         service = self
+        self.register_commands()
+        member_services.register()
+        text_replies.register()
 
         class ReceiveSink(voice_recv.AudioSink):
             def wants_opus(self):
@@ -174,19 +246,20 @@ class DiscordVoiceService:
             next_join = 0
             next_listen = 0
             while not self.stop_event.is_set():
-                if (self.voice is None or not self.voice.is_connected()) and time.monotonic() >= next_join:
+                if self.voice_enabled and (self.voice is None or not self.voice.is_connected()) and time.monotonic() >= next_join:
                     next_join = time.monotonic() + max(1, float(self.settings.get('reconnect_seconds', 5)))
                     try:
                         if self.voice is not None:
                             await self.voice.disconnect(force=True)
-                        channel = self.client.get_channel(self.channel_id) or await self.client.fetch_channel(self.channel_id)
-                        if not isinstance(channel, discord.VoiceChannel) or channel.guild.id != self.guild_id:
-                            self.on_status('Discord 指定頻道不是該伺服器的普通語音頻道')
-                            self.shutdown.set()
-                            return
-                        self.voice = await channel.connect(cls=voice_recv.VoiceRecvClient,
-                                                           self_deaf=False, self_mute=False, timeout=20)
-                        self.voice.listen(ReceiveSink())
+                        async with self.channel_lock:
+                            if not self.voice_enabled:
+                                continue
+                            channel = self.client.get_channel(self.channel_id) or await self.client.fetch_channel(self.channel_id)
+                            if not isinstance(channel, discord.VoiceChannel) or channel.guild.id != self.guild_id:
+                                raise ValueError('Discord 指定頻道不正確')
+                            self.voice = await channel.connect(cls=voice_recv.VoiceRecvClient,
+                                                               self_deaf=False, self_mute=False, timeout=20)
+                            self.voice.listen(ReceiveSink())
                         self.on_status('Discord 語音已連線：停頓後辨識，語音回覆優先排隊')
                     except Exception as exc:
                         self.on_status(f'Discord 語音連線失敗：{type(exc).__name__}，稍後重試')

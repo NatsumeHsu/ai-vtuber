@@ -55,7 +55,7 @@ class AudioTests(unittest.TestCase):
 
     def test_playback_waits_for_completion_and_pads_frames(self):
         async def run():
-            service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1, 'voice_channel_id': 2},
+            service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1},
                                           lambda _: '', lambda *args: None, lambda _: None)
             service.loop = asyncio.get_running_loop()
             frames = []
@@ -78,9 +78,11 @@ class AudioTests(unittest.TestCase):
         import discord
         from types import SimpleNamespace
         async def run():
-            service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1, 'voice_channel_id': 2,
+            service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1,
                                             'min_speech_seconds': 0.02, 'silence_seconds': 0.02},
                                           lambda _: '', lambda *args: None, lambda _: None)
+            service.channel_id = 2
+            service.voice_enabled = True
             voice = Mock()
             voice.disconnect = AsyncMock()
             voice.is_connected.return_value = True
@@ -113,6 +115,9 @@ class AudioTests(unittest.TestCase):
                 async def close(self):
                     self.closed.set()
 
+                def event(self, function):
+                    return function
+
             def status(text):
                 if '已連線' in text:
                     sink = voice.listen.call_args.args[0]
@@ -121,7 +126,9 @@ class AudioTests(unittest.TestCase):
                     asyncio.get_running_loop().call_later(0.15, service.shutdown.set)
 
             service.on_status = status
-            with patch.object(discord, 'Client', Client):
+            tree = Mock()
+            tree.command.return_value = lambda function: function
+            with patch.object(discord, 'Client', Client), patch('discord.app_commands.CommandTree', return_value=tree):
                 await asyncio.wait_for(service._serve(), timeout=3)
             self.assertEqual(service.audio_jobs.get_nowait()[:2], (42, '觀眾'))
             self.assertFalse(channel.connect.call_args.kwargs['self_deaf'])
@@ -184,8 +191,9 @@ class PriorityTests(unittest.TestCase):
         def callback(user_id, speaker, text):
             self.app.enqueue_discord_message(user_id, speaker, text)
             received.set()
-        service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1, 'voice_channel_id': 2},
+        service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1},
                                       lambda samples: '辨識後的繁體文字', callback, lambda _: None)
+        service.voice_enabled = True
         service.asr_thread = threading.Thread(target=service._transcribe_loop)
         service.asr_thread.start()
         try:

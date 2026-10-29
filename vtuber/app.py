@@ -58,6 +58,7 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
         self.camera_thread = None
         self.gaze_target = (0.0, 0.0)
         self.manual_middle_finger = False
+        self._close_lock = threading.Lock()
 
     def initialize_models(self):
         from .runtime_support import prepare_runtime
@@ -65,7 +66,8 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
         from .process_runtime import ServiceProcess, ModelProxy, DiscordProxy
         self.services = {
             kind: ServiceProcess(kind, self.root, self.settings_path, self.service_callback)
-            for kind in ('text', 'speech', 'discord', 'twitch')}
+            for kind in (('text', 'speech', 'twitch') if hasattr(self, 'host_peer')
+                         else ('text', 'speech', 'discord', 'twitch'))}
         for kind in ('text', 'speech'):
             if self.stop.is_set():
                 return
@@ -73,11 +75,10 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
             self.services[kind].call('ready')
         self.llm = ModelProxy(self.services['text'])
         self.tts = ModelProxy(self.services['speech'])
-        needs_asr = self.asr_settings['enabled'] or self.settings.get('discord', {}).get('enabled', False)
-        self.recognizer, self.converter = self.init_asr() if needs_asr else (None, None)
+        self.recognizer, self.converter = self.init_asr()
         if self.stop.is_set():
             return
-        for kind in ('discord', 'twitch'):
+        for kind in (('twitch',) if hasattr(self, 'host_peer') else ('discord', 'twitch')):
             if self.stop.is_set():
                 return
             self.services[kind].start()
@@ -85,7 +86,7 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
                 self.services[kind].call('ready')
             except RuntimeError as exc:
                 self.post_control_event('error', str(exc))
-        if self.settings.get('discord', {}).get('enabled', False):
+        if not hasattr(self, 'host_peer'):
             self.discord = DiscordProxy(self.services['discord'])
         self.output = self.project_path(self.output_path)
         self.output.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +129,7 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
                         elif kind == 'discord':
                             from .process_runtime import DiscordProxy
                             self.settings['discord'] = fresh.get('discord', {})
-                            self.discord = DiscordProxy(service) if self.settings['discord'].get('enabled') else None
+                            self.discord = DiscordProxy(service)
                         elif kind == 'twitch':
                             self.settings['twitch'] = fresh.get('twitch', {})
                         self.post_control_event('log', f'{kind} 已啟動，PID {pid}')
@@ -139,6 +140,10 @@ class VtuberAI(SettingsMixin, StorageMixin, SpeechMixin, AvatarMixin, TrackingMi
         threading.Thread(target=work, daemon=True).start()
 
     def close(self):
+        with self._close_lock:
+            self._close_resources()
+
+    def _close_resources(self):
         self.stop.set()
         if self.discord is not None:
             self.discord.close()
