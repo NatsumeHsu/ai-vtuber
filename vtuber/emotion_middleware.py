@@ -1,4 +1,4 @@
-"""Analyze spoken replies with the existing LLM, without changing chat history."""
+"""使用既有 LLM 分析朗讀情緒，不改寫對話歷史。"""
 import json
 import logging
 import math

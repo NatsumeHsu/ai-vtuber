@@ -52,3 +52,8 @@ fugashi[unidic-lite]
 wetext>=0.0.9; sys_platform != 'linux'
 
 cv2-enumerate-cameras==1.4.0
+
+# Discord voice: pinned DAVE-compatible receive implementation (upstream PR #65).
+discord.py[voice]==2.7.1
+davey==0.1.7
+discord-ext-voice-recv @ https://github.com/idoldange/discord-ext-voice-recv/archive/4da8413355893ed93798be9b4f3a07bc083875f6.zip

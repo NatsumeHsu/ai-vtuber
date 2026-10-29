@@ -1,4 +1,4 @@
-"""Read Twitch IRC in a separate thread; model work stays in the AI queue."""
+"""獨立執行緒接收 Twitch IRC，模型工作交由應用程式處理。"""
 import asyncio
 import re
 import secrets

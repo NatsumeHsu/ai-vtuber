@@ -25,7 +25,7 @@ class IndexTTSClient:
         if conversion:
             from opencc import OpenCC
             self.text_converter = OpenCC(conversion)
-        from runtime_support import prepare_runtime
+        from .runtime_support import prepare_runtime
         prepare_runtime()
         engine_path = str(self.engine_root)
         if engine_path not in sys.path:

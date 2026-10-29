@@ -1,4 +1,4 @@
-"""Capture DirectShow cameras in process through OpenCV."""
+"""透過 OpenCV 在程式內擷取 DirectShow 攝影機。"""
 import cv2
 from cv2_enumerate_cameras import enumerate_cameras
 

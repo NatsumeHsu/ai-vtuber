@@ -6,14 +6,14 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 import numpy as np
 import soundfile as sf
-from vtuberAI import VtuberAI
+from vtuber import VtuberAI
 
 app=VtuberAI()
 app.auto_play=False
 app.output_path='logs/integration-test.wav'
 started=time.monotonic()
 try:
-    from hand_gestures import HandGestures
+    from vtuber.hand_gestures import HandGestures
     gesture=app.live2d_settings.get('camera_tracking',{}).get('gestures',{})
     if gesture.get('enabled'):
         hands=HandGestures(app.project_path(gesture['model_path']),gesture)
@@ -27,7 +27,8 @@ try:
     result=app.llm.create_chat_completion(messages=[{'role':'user','content':'請用一句繁體中文說你好。'}],max_tokens=32,temperature=0)
     print('LLM PASS:',result['choices'][0]['message']['content'],flush=True)
     if app.recognizer is not None:
-        result=app.recognizer.generate(input=np.zeros(16000,dtype=np.float32),cache={},language='auto',use_itn=True,batch_size_s=30)
+        result=app.recognize_samples(np.zeros(16000,dtype=np.float32))
+        assert isinstance(result,str)
         print('ASR PASS:',result,flush=True)
     app.synthesize('[shy]你好，我是白璃。新的語音系統已經準備好了。')
     assert app.last_emotion_error is None, app.last_emotion_error

@@ -11,7 +11,7 @@ def prepare_runtime():
     if _READY:
         return
     _READY=True
-    root=Path(__file__).resolve().parent
+    root=Path(__file__).resolve().parents[1]
     directories=[root]
     if os.name=='nt':
         site=Path(sysconfig.get_path('purelib'))

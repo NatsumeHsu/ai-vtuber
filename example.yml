@@ -270,3 +270,18 @@ audience_memory:
     "warmth":0.5, "engagement":0.5}。
     warmth、engagement 為 0 到 1，代表語氣溫暖度與回覆投入程度，不是取樣溫度。
     沒有足夠互動證據時兩值使用 0.5，關係使用「尚不熟悉的觀眾」。
+
+# Discord 雙向語音：Bot token 僅填入已排除 Git 的本機 setting.yml。
+# voice_channel_id 為普通語音頻道；語音辨識後優先排隊，完成當輪回覆與播放再處理。
+discord:
+  enabled: false
+  bot_token: ''
+  guild_id: 0
+  voice_channel_id: 0
+  local_playback: false
+  speech_threshold: 0.015
+  silence_seconds: 0.8
+  min_speech_seconds: 0.25
+  max_utterance_seconds: 20
+  max_speakers: 16
+  reconnect_seconds: 5

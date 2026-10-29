@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 def main():
-    from runtime_support import prepare_runtime
+    from vtuber.runtime_support import prepare_runtime
     prepare_runtime()
     import yaml
     import argparse
@@ -44,9 +44,15 @@ def main():
         assert p.is_file() and p.stat().st_size, f'Missing asset: {p}'
     require(settings['llm']['model_path'])
     require(settings['live2d']['model_path'])
-    if settings['asr']['enabled']:
+    if settings['asr']['enabled'] or settings.get('discord', {}).get('enabled', False):
         require(str(Path(settings['asr']['model_dir']) / 'model.pt'))
         require(str(Path(settings['asr']['model_dir']) / 'config.yaml'))
+    if settings.get('discord', {}).get('enabled', False):
+        from discord.ext.voice_recv.opus import PacketDecoder
+        assert hasattr(PacketDecoder, '_dave_decrypt'), 'Discord receiver requires the pinned DAVE-compatible build'
+        from vtuber.discord_voice import DiscordVoiceService
+        DiscordVoiceService(settings['discord'], None, None, None)
+        print('Discord voice dependencies and configuration OK', flush=True)
     gesture = settings['live2d'].get('camera_tracking', {}).get('gestures', {})
     if gesture.get('enabled'):
         require(gesture['model_path'])

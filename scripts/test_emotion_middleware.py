@@ -4,7 +4,7 @@ from unittest.mock import Mock
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 import yaml
-from emotion_middleware import EmotionAnalyzer
+from vtuber.emotion_middleware import EmotionAnalyzer
 
 class EmotionTests(unittest.TestCase):
     def setUp(self):
@@ -29,7 +29,21 @@ class EmotionTests(unittest.TestCase):
         self.assertEqual(a.analyze('你好'),self.options['fallback_vector'])
         a.settings=dict(a.settings,enabled=False)
         self.assertIsNone(a.analyze('你好'))
-    def test_settings_preserved(self):
-        self.assertEqual(self.settings['tts']['python'],'.venv/Scripts/python.exe')
+    def test_tts_boundary_converts_only_spoken_text(self):
+        import tempfile
+        import threading
+        from opencc import OpenCC
+        from vtuber.index_tts_client import IndexTTSClient
+        client=IndexTTSClient.__new__(IndexTTSClient)
+        client.lock=threading.Lock()
+        client.model=Mock()
+        client.reference=Path('reference.wav')
+        client.settings={'generation': {}}
+        client.text_converter=OpenCC('t2s')
+        original='歡迎回來'
+        with tempfile.TemporaryDirectory() as folder:
+            client.synthesize(original,Path(folder)/'test.wav')
+        self.assertEqual(client.model.infer.call_args.kwargs['text'],'欢迎回来')
+        self.assertEqual(original,'歡迎回來')
 
 if __name__=='__main__': unittest.main()

@@ -1,4 +1,4 @@
-"""Local audience archive and incremental relationship summaries."""
+"""觀眾發言封存與增量人際關係摘要。"""
 from contextlib import closing
 import json
 import logging
