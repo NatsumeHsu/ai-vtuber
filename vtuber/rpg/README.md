@@ -1,5 +1,7 @@
 # Twitch／Discord 共用 Idleology RPG
 
+玩家玩法、賺錢方式與完整指令請看 [RPG 玩家指南](玩家指南.md)。
+
 已以 Idleology 遊戲程式取代原本固定每分鐘發金幣的原型。
 上游角色、裝備、採集、夥伴、聚落、戰鬥與進階玩法位於 `idleology/`；
 既有 Discord Bot 載入 33 個遊戲 Cog，不啟動另一個 Bot。
