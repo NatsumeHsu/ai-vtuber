@@ -13,8 +13,8 @@ sys.path.insert(0, str(ROOT))
 
 def main():
     import yaml
-    from vtuber.runtime_support import prepare_runtime
-    from vtuber.audience_memory import AudienceMemory
+    from vtuber.runtime.runtime_support import prepare_runtime
+    from database.audience_memory import AudienceMemory
     from vtuber import VtuberAI
     prepare_runtime()
     from llama_cpp import Llama

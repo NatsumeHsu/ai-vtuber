@@ -6,7 +6,8 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vtuber.process_runtime import Peer, ServiceProcess
+from vtuber.runtime.ipc import Peer
+from vtuber.runtime.process_runtime import ServiceProcess
 
 
 class ProcessTests(unittest.TestCase):

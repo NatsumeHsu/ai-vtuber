@@ -1,0 +1,791 @@
+import random
+from typing import Any, Dict, Literal, Optional, Tuple, Union
+
+from vtuber.rpg.idleology.core.models import Armor, Boot, Glove, Helmet, Weapon
+
+_Reinforceable = Union[Armor, Glove, Boot, Helmet]
+
+
+class EquipmentMechanics:
+    """
+    Handles the logic for upgrading, refining, and modifying equipment.
+    Does NOT handle DB writes or Discord UI.
+    """
+
+    # --- WEAPON FORGING LOGIC ---
+    @staticmethod
+    def calculate_forge_cost(weapon: Weapon) -> Optional[Dict[str, int]]:
+        """
+        Returns the resource cost to forge a weapon based on level and remaining forges.
+        Returns None if no forges remaining.
+        Keys: 'ore_type', 'log_type', 'bone_type', 'ore_qty', 'log_qty', 'bone_qty', 'gold'
+        """
+        if weapon.forges_remaining < 1:
+            return None
+
+        # Determine Tier by forge_tier (successful forges completed), NOT forges_remaining.
+        # This means a failed attempt does not escalate material costs for the next attempt.
+        ft = weapon.forge_tier  # 0 = no successes yet, 1 = first success done, etc.
+
+        if weapon.level <= 40:
+            tier_data = {
+                0: {
+                    "ore": "iron_ore",
+                    "log": "oak",
+                    "bone": "desiccated",
+                    "qty": 10,
+                    "gold": 100,
+                },
+                1: {
+                    "ore": "coal_ore",
+                    "log": "willow",
+                    "bone": "regular",
+                    "qty": 10,
+                    "gold": 400,
+                },
+                2: {
+                    "ore": "gold_ore",
+                    "log": "mahogany",
+                    "bone": "sturdy",
+                    "qty": 10,
+                    "gold": 1000,
+                },
+            }
+        elif weapon.level <= 80:
+            tier_data = {
+                0: {
+                    "ore": "iron_ore",
+                    "log": "oak",
+                    "bone": "desiccated",
+                    "qty": 25,
+                    "gold": 250,
+                },
+                1: {
+                    "ore": "coal_ore",
+                    "log": "willow",
+                    "bone": "regular",
+                    "qty": 25,
+                    "gold": 1000,
+                },
+                2: {
+                    "ore": "gold_ore",
+                    "log": "mahogany",
+                    "bone": "sturdy",
+                    "qty": 25,
+                    "gold": 2500,
+                },
+                3: {
+                    "ore": "platinum_ore",
+                    "log": "magic",
+                    "bone": "reinforced",
+                    "qty": 25,
+                    "gold": 5000,
+                },
+            }
+        else:  # Level 80+
+            tier_data = {
+                0: {
+                    "ore": "iron_ore",
+                    "log": "oak",
+                    "bone": "desiccated",
+                    "qty": 50,
+                    "gold": 500,
+                },
+                1: {
+                    "ore": "coal_ore",
+                    "log": "willow",
+                    "bone": "regular",
+                    "qty": 50,
+                    "gold": 2000,
+                },
+                2: {
+                    "ore": "gold_ore",
+                    "log": "mahogany",
+                    "bone": "sturdy",
+                    "qty": 50,
+                    "gold": 5000,
+                },
+                3: {
+                    "ore": "platinum_ore",
+                    "log": "magic",
+                    "bone": "reinforced",
+                    "qty": 50,
+                    "gold": 10000,
+                },
+                4: {
+                    "ore": "idea_ore",
+                    "log": "idea",
+                    "bone": "titanium",
+                    "qty": 50,
+                    "gold": 20000,
+                },
+            }
+
+        cost = tier_data.get(ft) or tier_data.get(max(tier_data.keys()))
+        if not cost:
+            return None
+
+        return {
+            "ore_type": cost["ore"],
+            "log_type": cost["log"],
+            "bone_type": cost["bone"],
+            "ore_qty": cost["qty"],
+            "log_qty": cost["qty"],
+            "bone_qty": cost["qty"],
+            "gold": cost["gold"],
+        }
+
+    @staticmethod
+    def calculate_forge_success_rate(weapon: Weapon) -> float:
+        """
+        Returns the success rate (0.0-1.0) for the weapon's next forge attempt.
+        """
+        base_rate = 0.8
+
+        # Determine max forges for this tier to calculate decay
+        max_forges = 3
+        if weapon.level > 40:
+            max_forges = 4
+        if weapon.level > 80:
+            max_forges = 5
+
+        # Current forge step (e.g., if max is 3 and remaining is 3, step is 0)
+        current_step = max_forges - weapon.forges_remaining
+        return base_rate - (current_step * 0.05)
+
+    @staticmethod
+    def roll_forge_outcome(weapon: Weapon) -> Tuple[bool, str]:
+        """
+        Determines if a forge succeeds and selects a passive.
+        Returns (Success: bool, PassiveName: str)
+        """
+        success_rate = EquipmentMechanics.calculate_forge_success_rate(weapon)
+
+        if random.random() > success_rate:
+            return False, weapon.passive  # Fail, keep existing
+
+        # Success — all passives start at Tier I on first forge.
+        # Stored as 'family_1' through 'family_5'; upgrade increments the suffix.
+        _FORGE_POOL = [
+            "burning_1",
+            "poison_1",
+            "debilitate_1",
+            "shocking_1",
+            "sturdy_1",
+            "piercing_1",
+            "cull_1",
+            "deadeye_1",
+            "echo_1",
+            "arcane_1",
+        ]
+
+        if weapon.passive == "none":
+            return True, random.choice(_FORGE_POOL)
+        else:
+            # Upgrade: parse current tier and increment, capped at 5
+            try:
+                family, tier_str = weapon.passive.rsplit("_", 1)
+                tier = int(tier_str)
+                if tier >= 5:
+                    return True, weapon.passive  # Already max tier
+                return True, f"{family}_{tier + 1}"
+            except ValueError:
+                # Malformed passive — replace with a fresh Tier I roll
+                return True, random.choice(_FORGE_POOL)
+
+    # --- WEAPON REFINING LOGIC ---
+    @staticmethod
+    def calculate_refine_cost(weapon: Weapon) -> Dict[str, Any]:
+        """
+        Calculates Gold and Material costs for refining based on level and current refinement.
+        Returns: {'gold': int, 'materials': List[Dict]}
+        """
+        rem = weapon.refines_remaining
+        lvl = weapon.level
+        ref_lvl = weapon.refinement_lvl
+
+        # 1. Calculate Gold Cost (Existing Logic)
+        gold_cost = 1000
+        if lvl <= 40:
+            costs = {3: 500, 2: 1000, 1: 5000}
+            gold_cost = costs.get(rem, 1000)
+        elif lvl <= 80:
+            costs = {4: 5000, 3: 15000, 2: 25000, 1: 50000}
+            gold_cost = costs.get(rem, 50000)
+        else:
+            costs = {5: 10000, 4: 30000, 3: 50000, 2: 100000, 1: 200000}
+            gold_cost = costs.get(rem, 200000)
+
+        # 1b. High-refinement gold scaling (overrides base cost at ref_lvl 100+)
+        # 100–199 → 300k, 200–299 → 400k, +100k per 100 ref_lvl bracket
+        if ref_lvl >= 100:
+            gold_cost = (ref_lvl // 100 + 2) * 100_000
+
+        # 2. Calculate Material Cost (New Logic > +100)
+        materials = []
+
+        if ref_lvl >= 100:
+            qty = 0
+            tier_idx = 0  # 0=Iron/Oak/Desiccated, 1=Steel/Willow/Reg, etc.
+
+            # Logic Table
+            if 100 <= ref_lvl <= 120:
+                qty = 10
+                tier_idx = 0
+            elif 121 <= ref_lvl <= 140:
+                qty = 10
+                tier_idx = 1
+            elif 141 <= ref_lvl <= 160:
+                qty = 10
+                tier_idx = 2
+            elif 161 <= ref_lvl <= 180:
+                qty = 10
+                tier_idx = 3
+            elif 181 <= ref_lvl <= 200:
+                qty = 10
+                tier_idx = 4
+            else:  # 201+
+                qty = 10 + int((ref_lvl - 200) / 5)
+                tier_idx = 4  # Cap at Idea/Titanium tier
+
+            res_defs = [
+                ("iron_bar", "oak_plank", "desiccated_essence", "Iron/Oak/Desiccated"),
+                (
+                    "steel_bar",
+                    "willow_plank",
+                    "regular_essence",
+                    "Steel/Willow/Regular",
+                ),
+                (
+                    "gold_bar",
+                    "mahogany_plank",
+                    "sturdy_essence",
+                    "Gold/Mahogany/Sturdy",
+                ),
+                (
+                    "platinum_bar",
+                    "magic_plank",
+                    "reinforced_essence",
+                    "Platinum/Magic/Reinforced",
+                ),
+                ("idea_bar", "idea_plank", "titanium_essence", "Idea/Titanium"),
+            ]
+
+            def_t = res_defs[tier_idx]
+
+            materials.append(
+                {
+                    "table": "mining",
+                    "column": def_t[0],
+                    "qty": qty,
+                    "name": def_t[0].replace("_", " ").title(),
+                }
+            )
+            materials.append(
+                {
+                    "table": "woodcutting",
+                    "column": def_t[1],
+                    "qty": qty,
+                    "name": def_t[1].replace("_", " ").title(),
+                }
+            )
+            materials.append(
+                {
+                    "table": "fishing",
+                    "column": def_t[2],
+                    "qty": qty,
+                    "name": def_t[2].replace("_", " ").title(),
+                }
+            )
+
+        return {"gold": gold_cost, "materials": materials}
+
+    @staticmethod
+    def calculate_refine_refund(weapon: Weapon) -> int:
+        """
+        Refinement rune refund granted when a weapon is discarded.
+        Applies only at higher refinement levels; returns 0 otherwise.
+        """
+        if weapon.refinement_lvl <= 0:
+            return 0
+        runes_back = max(0, int(weapon.refinement_lvl - 6 * 0.8))
+        return runes_back
+
+    @staticmethod
+    def calculate_shatter_refund(item: "_Reinforceable") -> int:
+        """
+        Shatter rune refund granted when armor/glove/boot/helmet is discarded.
+        Shatter Runes grant extra reinforce slots beyond the item's base allotment
+        (reinforcement_lvl + reinforces_remaining - base_slots); ~80% of those
+        spent runes are recovered.
+        """
+        base_slots = 3 if item.level <= 40 else (4 if item.level <= 80 else 5)
+        shatter_used = item.reinforcement_lvl + item.reinforces_remaining - base_slots
+        if shatter_used <= 0:
+            return 0
+        return max(0, int(shatter_used * 0.8))
+
+    # Per-refine soft caps. get_scaled_stat approaches these asymptotically via a
+    # hyperbolic curve: expected = cap * (level / (level + 100)), ±20% variance.
+    _REFINE_CAPS = {"attack": 15, "defence": 10, "rarity": 50}
+
+    # High-refinement acceleration: every 100 refinement levels is one "bracket",
+    # capped at bracket 5 (ref_lvl 500+) so the multipliers plateau instead of
+    # growing without bound. The average multiplier grows with bracket**1.5 and
+    # the ceiling multiplier with bracket**1.6 so the roll's upper end pulls away
+    # from its average the deeper a weapon is refined — big jackpot rolls become
+    # both more common and larger at high ref_lvl, not just a flat average bump.
+    _REFINE_TIER_CAP = 5
+
+    @staticmethod
+    def _refine_tier(ref_lvl: int) -> int:
+        return min(ref_lvl // 100, EquipmentMechanics._REFINE_TIER_CAP)
+
+    @staticmethod
+    def _refine_avg_mult(bracket: int) -> float:
+        return 1 + 0.16 * bracket**1.5
+
+    @staticmethod
+    def _refine_upper_mult(bracket: int) -> float:
+        return 1.2 + 0.20 * bracket**1.6
+
+    @staticmethod
+    def _refine_roll(level: int, cap: float, ref_lvl: int = 0) -> int:
+        """Hyperbolic soft-cap roll for a single refine stat gain, accelerated by ref_lvl."""
+        bracket = EquipmentMechanics._refine_tier(ref_lvl)
+        expected = (
+            cap * (level / (level + 100)) * EquipmentMechanics._refine_avg_mult(bracket)
+        )
+        upper = EquipmentMechanics._refine_upper_mult(bracket)
+        return max(1, int(random.uniform(expected * 0.8, expected * upper)))
+
+    @staticmethod
+    def roll_refine_outcome(weapon: Weapon) -> Dict[str, int]:
+        """
+        Calculates stat gains for a single refine action.
+        Returns dict: {'attack': val, 'defence': val, 'rarity': val}
+        """
+        stats = {"attack": 0, "defence": 0, "rarity": 0}
+        ref_lvl = weapon.refinement_lvl
+
+        if random.randint(0, 100) < 80:  # 80% attack
+            stats["attack"] = EquipmentMechanics._refine_roll(
+                weapon.level, EquipmentMechanics._REFINE_CAPS["attack"], ref_lvl
+            )
+
+        if random.randint(0, 100) < 50:  # 50% defence
+            stats["defence"] = EquipmentMechanics._refine_roll(
+                weapon.level, EquipmentMechanics._REFINE_CAPS["defence"], ref_lvl
+            )
+
+        if random.randint(0, 100) < 20:  # 20% rarity
+            stats["rarity"] = EquipmentMechanics._refine_roll(
+                weapon.level, EquipmentMechanics._REFINE_CAPS["rarity"], ref_lvl
+            )
+
+        return stats
+
+    # --- ARMOR TEMPERING LOGIC ---
+    @staticmethod
+    def calculate_temper_cost(armor: Armor) -> Optional[Dict[str, int]]:
+        """
+        Returns cost to temper armor. Identical logic structure to weapons but different values.
+        """
+        if armor.temper_remaining < 1:
+            return None
+
+        # Simplified mapping based on original armor.py
+        if armor.level <= 40:
+            tier_data = {
+                3: {
+                    "ore": "iron_ore",
+                    "log": "oak",
+                    "bone": "desiccated",
+                    "qty": 20,
+                    "gold": 500,
+                },
+                2: {
+                    "ore": "coal_ore",
+                    "log": "willow",
+                    "bone": "regular",
+                    "qty": 20,
+                    "gold": 100,
+                },
+                1: {
+                    "ore": "gold_ore",
+                    "log": "mahogany",
+                    "bone": "sturdy",
+                    "qty": 20,
+                    "gold": 2000,
+                },
+            }
+        elif armor.level <= 80:
+            tier_data = {
+                4: {
+                    "ore": "iron_ore",
+                    "log": "oak",
+                    "bone": "desiccated",
+                    "qty": 50,
+                    "gold": 500,
+                },
+                3: {
+                    "ore": "coal_ore",
+                    "log": "willow",
+                    "bone": "regular",
+                    "qty": 50,
+                    "gold": 1500,
+                },
+                2: {
+                    "ore": "gold_ore",
+                    "log": "mahogany",
+                    "bone": "sturdy",
+                    "qty": 50,
+                    "gold": 3000,
+                },
+                1: {
+                    "ore": "platinum_ore",
+                    "log": "magic",
+                    "bone": "reinforced",
+                    "qty": 50,
+                    "gold": 6000,
+                },
+            }
+        else:
+            tier_data = {
+                5: {
+                    "ore": "iron_ore",
+                    "log": "oak",
+                    "bone": "desiccated",
+                    "qty": 100,
+                    "gold": 500,
+                },
+                4: {
+                    "ore": "coal_ore",
+                    "log": "willow",
+                    "bone": "regular",
+                    "qty": 100,
+                    "gold": 2000,
+                },
+                3: {
+                    "ore": "gold_ore",
+                    "log": "mahogany",
+                    "bone": "sturdy",
+                    "qty": 100,
+                    "gold": 5000,
+                },
+                2: {
+                    "ore": "platinum_ore",
+                    "log": "magic",
+                    "bone": "reinforced",
+                    "qty": 100,
+                    "gold": 10000,
+                },
+                1: {
+                    "ore": "idea_ore",
+                    "log": "idea",
+                    "bone": "titanium",
+                    "qty": 100,
+                    "gold": 20000,
+                },
+            }
+
+        cost = tier_data.get(armor.temper_remaining)
+        if not cost:
+            return None
+
+        return {
+            "ore_type": cost["ore"],
+            "log_type": cost["log"],
+            "bone_type": cost["bone"],
+            "ore_qty": cost["qty"],
+            "log_qty": cost["qty"],
+            "bone_qty": cost["qty"],
+            "gold": cost["gold"],
+        }
+
+    @staticmethod
+    def roll_temper_outcome(
+        armor: Armor, bonus_chance: int = 0
+    ) -> Tuple[bool, str, int]:
+        """
+        Returns (Success, StatIncreased, Amount).
+        bonus_chance: Flat percentage added to success rate (e.g., 10).
+        """
+        base_rate = 0.8  # 80% base
+        max_tempers = 3
+        if armor.level > 40:
+            max_tempers = 4
+        if armor.level > 80:
+            max_tempers = 5
+
+        current_step = max_tempers - armor.temper_remaining
+        success_rate = base_rate - (current_step * 0.05) + (bonus_chance / 100.0)
+
+        if random.random() > success_rate:
+            return False, "", 0
+
+        stat = "fdr"
+        amount = 0
+        if armor.pdr > 0:
+            stat = "pdr"
+            # Each temper adds up to ~5 PDR, approaching the per-temper cap asymptotically
+            expected = 5
+            amount = max(1, int(random.uniform(expected * 0.7, expected * 1.3)))
+        elif armor.fdr > 0:
+            stat = "fdr"
+            # Each temper adds up to ~10 FDR
+            expected = 10
+            amount = max(1, int(random.uniform(expected * 0.8, expected * 1.2)))
+
+        return True, stat, amount
+
+    # --- ARMOR REINFORCEMENT LOGIC ---
+    @staticmethod
+    def calculate_reinforce_cost(armor: "_Reinforceable") -> Dict[str, Any]:
+        """
+        Calculates Gold and Material costs for reinforcing armor.
+        Costs are 1/5 of weapon refinement costs. Materials kick in at reinforcement_lvl 100+
+        with qty=2 instead of the weapon's qty=10.
+        """
+        rem = armor.reinforces_remaining
+        lvl = armor.level
+        ref_lvl = armor.reinforcement_lvl
+
+        # 1. Gold cost (refine costs ÷ 5)
+        gold_cost = 200
+        if lvl <= 40:
+            costs = {3: 100, 2: 200, 1: 1000}
+            gold_cost = costs.get(rem, 200)
+        elif lvl <= 80:
+            costs = {4: 1000, 3: 3000, 2: 5000, 1: 10000}
+            gold_cost = costs.get(rem, 10000)
+        else:
+            costs = {5: 2000, 4: 6000, 3: 10000, 2: 20000, 1: 40000}
+            gold_cost = costs.get(rem, 40000)
+
+        # 1b. High-reinforcement gold scaling (overrides base cost at ref_lvl 100+)
+        if ref_lvl >= 100:
+            gold_cost = (ref_lvl // 100 + 2) * 20_000
+
+        # 2. Material costs (ref_lvl 100+, qty=2)
+        materials = []
+
+        if ref_lvl >= 100:
+            qty = 0
+            tier_idx = 0
+
+            if 100 <= ref_lvl <= 120:
+                qty = 2
+                tier_idx = 0
+            elif 121 <= ref_lvl <= 140:
+                qty = 2
+                tier_idx = 1
+            elif 141 <= ref_lvl <= 160:
+                qty = 2
+                tier_idx = 2
+            elif 161 <= ref_lvl <= 180:
+                qty = 2
+                tier_idx = 3
+            elif 181 <= ref_lvl <= 200:
+                qty = 2
+                tier_idx = 4
+            else:  # 201+
+                qty = 2 + (ref_lvl - 200)
+                tier_idx = 4
+
+            res_defs = [
+                ("iron_bar", "oak_plank", "desiccated_essence", "Iron/Oak/Desiccated"),
+                (
+                    "steel_bar",
+                    "willow_plank",
+                    "regular_essence",
+                    "Steel/Willow/Regular",
+                ),
+                (
+                    "gold_bar",
+                    "mahogany_plank",
+                    "sturdy_essence",
+                    "Gold/Mahogany/Sturdy",
+                ),
+                (
+                    "platinum_bar",
+                    "magic_plank",
+                    "reinforced_essence",
+                    "Platinum/Magic/Reinforced",
+                ),
+                ("idea_bar", "idea_plank", "titanium_essence", "Idea/Titanium"),
+            ]
+
+            def_t = res_defs[tier_idx]
+
+            materials.append(
+                {
+                    "table": "mining",
+                    "column": def_t[0],
+                    "qty": qty,
+                    "name": def_t[0].replace("_", " ").title(),
+                }
+            )
+            materials.append(
+                {
+                    "table": "woodcutting",
+                    "column": def_t[1],
+                    "qty": qty,
+                    "name": def_t[1].replace("_", " ").title(),
+                }
+            )
+            materials.append(
+                {
+                    "table": "fishing",
+                    "column": def_t[2],
+                    "qty": qty,
+                    "name": def_t[2].replace("_", " ").title(),
+                }
+            )
+
+        return {"gold": gold_cost, "materials": materials}
+
+    _REINFORCE_CAPS = {"attack": 12, "defence": 12, "main_stat": 12, "ward": 3}
+
+    @staticmethod
+    def roll_reinforce_outcome(
+        item: "_Reinforceable", stat_col: str = "main_stat"
+    ) -> int:
+        """Returns the stat gain for a single reinforce. Always at least 1."""
+        cap = EquipmentMechanics._REINFORCE_CAPS.get(stat_col, 12)
+        expected = cap * (item.level / (item.level + 100))
+        return max(1, int(random.uniform(expected * 0.8, expected * 1.2)))
+
+    @staticmethod
+    def roll_celestial_passive(current_passive: str) -> str:
+        """Rolls a new Celestial Armor passive."""
+        pool = [
+            "celestial_ghostreaver",
+            "celestial_glancing_blows",
+            "celestial_wind_dancer",
+            "celestial_sanctity",
+            "celestial_vow",
+            "celestial_fortress",
+        ]
+
+        available = [p for p in pool if p != current_passive]
+        if not available:
+            available = pool
+
+        return random.choice(available)
+
+    @staticmethod
+    def roll_infernal_passive(current_passive: str) -> str:
+        """Rolls a new Infernal Weapon passive."""
+        pool = [
+            "soulreap",
+            "inverted_edge",
+            "gilded_hunger",
+            "cursed_precision",
+            "diabolic_pact",
+            "perdition",
+            "voracious",
+            "last_rites",
+        ]
+
+        available = [p for p in pool if p != current_passive]
+        if not available:
+            available = pool
+
+        return random.choice(available)
+
+    @staticmethod
+    def roll_void_passive(current_passive: str) -> str:
+        """Rolls a new Void Accessory passive."""
+        pool = [
+            "entropy",
+            "void_gaze",
+            "nullfield",
+            "eternal_hunger",
+            "fracture",
+            "void_echo",
+            "oblivion",
+            "unravelling",
+        ]
+
+        available = [p for p in pool if p != current_passive]
+        if not available:
+            available = pool
+
+        return random.choice(available)
+
+    # --- POTENTIAL (Accessory) LOGIC ---
+    @staticmethod
+    def calculate_potential_cost(level: int) -> int:
+        """Returns Gold cost based on current passive level (0-9)."""
+        costs = [500, 1000, 2000, 3000, 4000, 5000, 10000, 25000, 50000, 100000]
+        if level < len(costs):
+            return costs[level]
+        return 999999999
+
+    # --- POTENTIAL (Glove/Boot/Helmet) LOGIC ---
+    @staticmethod
+    def calculate_ap_cost(level: int) -> int:
+        """Returns Gold cost based on current passive level (0-9)."""
+        costs = [1000, 5000, 25000, 50000, 100000, 200000]
+        if level < len(costs):
+            return costs[level]
+        return 999999999
+
+    @staticmethod
+    def roll_potential_outcome(current_level: int, bonus_chance: int = 0) -> bool:
+        """
+        Calculates success based on level + bonus.
+        bonus_chance: Flat percentage (e.g. 25 or 15).
+        """
+        base_chance = max(75 - (current_level * 5), 30)
+        total_chance = base_chance + bonus_chance
+
+        return random.randint(1, 100) <= total_chance
+
+    @staticmethod
+    def get_new_passive(
+        item_type: Literal["accessory", "glove", "boot", "helmet"],
+    ) -> str:
+        """Returns a random passive name for a fresh unlock."""
+        if item_type == "accessory":
+            return random.choice(
+                ["Obliterate", "Absorb", "Prosper", "Infinite Wisdom", "Lucky Strikes"]
+            )
+        elif item_type == "glove":
+            return random.choice(
+                [
+                    "ward-touched",
+                    "ward-fused",
+                    "instability",
+                    "deftness",
+                    "adroit",
+                    "equilibrium",
+                    "plundering",
+                ]
+            )
+        elif item_type == "boot":
+            return random.choice(
+                [
+                    "speedster",
+                    "skiller",
+                    "treasure-tracker",
+                    "hearty",
+                    "cleric",
+                    "thrill-seeker",
+                ]
+            )
+        elif item_type == "helmet":
+            return random.choice(
+                [
+                    "thorns",
+                    "ghosted",
+                    "juggernaut",
+                    "insight",
+                    "volatile",
+                    "divine",
+                    "frenzy",
+                    "leeching",
+                ]
+            )
+        return "none"

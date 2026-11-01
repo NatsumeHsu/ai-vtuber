@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>白璃｜聊天室點歌台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/music/style.css">
+</head>
+
+<body>
+    <main>
+        <aside class="playback-sidebar">
+            <div class="video"><div id="player"></div></div>
+            <section class="queue playlist">
+                <p class="command">!點歌 YT連結</p>
+                <p id="playing" role="status">等待觀眾點歌</p>
+                <button id="resume" type="button" hidden>開始播放</button>
+                <h2>待播清單 <span id="count">0</span></h2>
+                <ol id="songs"></ol>
+                <p id="empty">等待觀眾點歌</p>
+                <p id="status" role="status">正在載入…</p>
+            </section>
+        </aside>
+        <section class="queue" id="controls">
+            <h1>播放控制板</h1>
+            <p id="remote-playing" role="status">播放器載入中…</p>
+            <div class="controls">
+                <button type="button" data-action="play">播放</button>
+                <button type="button" data-action="pause">暫停</button>
+                <button type="button" data-action="next">下一首</button>
+                <label>音量 <input id="volume" type="range" min="0" max="100" value="100"> <output id="volume-value">100%</output></label>
+            </div>
+            <p id="control-status" role="status"></p>
+            <p>聊天室輸入 <code>!點歌 YT連結</code></p>
+            <p class="hint">僅接受影片連結，不接受搜尋文字或純播放清單。無法嵌入的影片可在 YouTube 開啟。</p>
+            <section class="history-panel" aria-labelledby="history-heading">
+                <h2 id="history-heading">播放紀錄</h2>
+                <label for="history-search">搜尋標題或影片 ID</label>
+                <input id="history-search" type="search" placeholder="預設顯示全部，輸入文字搜尋…" autocomplete="off">
+                <p id="history-status" role="status"></p>
+                <h3>影片播放次數</h3>
+                <ul id="history-results"></ul>
+                <h3>最近播放紀錄</h3>
+                <ol id="history-records"></ol>
+            </section>
+        </section>
+    </main>
+    <script type="module" src="/music/app.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,86 @@
+from discord import Interaction, app_commands
+from discord.ext import commands
+
+from vtuber.rpg.idleology.core.codex.views import CodexMenuView
+from vtuber.rpg.idleology.core.first_use import TutorialGateView
+from vtuber.rpg.idleology.core.items.factory import load_player
+
+
+class Codex(commands.Cog, name="codex"):
+    def __init__(self, bot) -> None:
+        self.bot = bot
+
+    @app_commands.command(
+        name="codex",
+        description="Enter the Codex — an onslaught of curated chapters (Lvl 80+).",
+    )
+    async def codex(self, interaction: Interaction):
+        user_id = str(interaction.user.id)
+        server_id = str(interaction.guild_id)
+
+        # 1. Validate registration and state
+        existing_user = await self.bot.database.users.get(user_id, server_id)
+        if not await self.bot.check_user_registered(interaction, existing_user):
+            return
+        if not await self.bot.check_is_active(interaction, user_id):
+            return
+
+        # 2. Level gate
+        if existing_user["level"] < 80:
+            await interaction.response.send_message(
+                "The Codex only reveals itself to those who have reached **Level 80**.",
+                ephemeral=True,
+            )
+            return
+
+        # 3. Load player with all gear and tomes (cooldown is checked on Begin Run, not here)
+        player = await load_player(user_id, existing_user, self.bot.database)
+
+        # 5. Load Codex currencies
+        cur = await self.bot.database.users.get_all_currencies(user_id)
+        fragments = cur["codex_fragments"]
+        pages = cur["codex_pages"]
+        rerolls = cur["codex_rerolls"]
+        antique_tomes = cur["antique_tome"]
+
+        # 6. Load chapter history for display
+        try:
+            chapter_history = await self.bot.database.codex.get_chapter_clears(user_id)
+        except Exception:
+            chapter_history = {}
+
+        saved_run = await self.bot.database.codex.get_run(user_id, server_id)
+
+        # 7. Show menu
+        async def _build():
+            _view = CodexMenuView(
+                self.bot,
+                user_id,
+                player,
+                fragments,
+                pages,
+                rerolls,
+                chapter_history,
+                antique_tomes=antique_tomes,
+                server_id=server_id,
+                saved_run=saved_run,
+                player_avatar_url=existing_user["appearance"],
+            )
+            return None, _view
+
+        if not await self.bot.database.tutorials.has_seen(user_id, "codex"):
+            await self.bot.database.tutorials.mark_seen(user_id, "codex")
+            gate = TutorialGateView(
+                self.bot, user_id, server_id, "codex", build_main=_build
+            )
+            await interaction.response.send_message(embed=gate.build_embed(), view=gate)
+            gate.message = await interaction.original_response()
+            return
+
+        _, view = await _build()
+        await interaction.response.send_message(view=view)
+        view.message = await interaction.original_response()
+
+
+async def setup(bot) -> None:
+    await bot.add_cog(Codex(bot))

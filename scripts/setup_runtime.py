@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 def main():
-    from vtuber.runtime_support import prepare_runtime
+    from vtuber.runtime.runtime_support import prepare_runtime
     prepare_runtime()
     import yaml
     import argparse
@@ -27,8 +27,7 @@ def main():
         import shutil
         shutil.copy2(settings_path, settings_path.with_suffix(settings_path.suffix + '.device.bak'))
         settings_path.write_text(yaml.safe_dump(settings,allow_unicode=True,sort_keys=False),encoding='utf-8')
-    for module in ('numpy', 'cv2', 'mediapipe', 'live2d', 'pygame', 'OpenGL',
-                   'cv2_enumerate_cameras', 'sounddevice', 'soundfile', 'opencc', 'funasr', 'llama_cpp', 'torch', 'torchaudio'):
+    for module in ('fastapi', 'uvicorn', 'sqlalchemy', 'pystray', 'numpy', 'sounddevice', 'soundfile', 'opencc', 'funasr', 'llama_cpp', 'torch', 'torchaudio'):
         importlib.import_module(module)
         print('Import OK:', module, flush=True)
     import torch
@@ -50,12 +49,9 @@ def main():
     if settings.get('discord', {}).get('enabled', False):
         from discord.ext.voice_recv.opus import PacketDecoder
         assert hasattr(PacketDecoder, '_dave_decrypt'), 'Discord receiver requires the pinned DAVE-compatible build'
-        from vtuber.discord_voice import DiscordVoiceService
+        from vtuber.discord.discord_voice import DiscordVoiceService
         DiscordVoiceService(settings['discord'], None, None, None)
         print('Discord voice dependencies and configuration OK', flush=True)
-    gesture = settings['live2d'].get('camera_tracking', {}).get('gestures', {})
-    if gesture.get('enabled'):
-        require(gesture['model_path'])
     require(settings['tts']['reference_audio'])
     require('ffmpeg.exe')
     require('ffprobe.exe')

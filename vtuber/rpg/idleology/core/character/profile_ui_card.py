@@ -1,0 +1,682 @@
+"""
+core/character/profile_ui_card.py
+Embed builders for the card and cooldowns tabs of the Profile Hub.
+"""
+from vtuber.rpg.idleology.paths import asset_path
+
+import json
+import os
+from datetime import datetime, timedelta, timezone
+
+import discord
+
+from vtuber.rpg.idleology.core.character.prestige_display import format_prestige_name
+from vtuber.rpg.idleology.core.emojis import (
+    DEVELOPMENT_CONTRACT,
+    GOLD_COIN,
+    INFINITE_MAW,
+    NETHER_MARKET_PLUNDER,
+    QUEST_COMPLETE,
+    UBER_EMOJI,
+    ZEAL,
+)
+from vtuber.rpg.idleology.core.items.factory import load_player
+
+
+class CardProfileBuilder:
+    """Embed builders for the card and cooldowns profile tabs."""
+
+    @staticmethod
+    async def build_card(bot, user_id: str, server_id: str) -> discord.Embed:
+        user = await bot.database.users.get(user_id, server_id)
+        followers = await bot.database.social.get_follower_count(user["ideology"])
+        active = await bot.database.prestige.get_active(user_id)
+
+        embed = discord.Embed(title="Adventurer License", color=discord.Color.gold())
+        embed.set_image(url=user["appearance"])
+
+        display_name = active.get("display_name") or user["name"]
+        title_text = active.get("title") or ""
+        if title_text == "none":
+            title_text = ""
+        emblem_emoji = ""
+        emblem_key = active.get("emblem") or ""
+        if emblem_key:
+            from vtuber.rpg.idleology.core.emojis import EMBLEM_CATALOG
+
+            entry = EMBLEM_CATALOG.get(emblem_key)
+            if entry:
+                emblem_emoji = entry[1]
+        name_str = format_prestige_name(display_name, title_text, emblem_emoji)
+
+        embed.add_field(name="🪪 Name", value=f"**{name_str}**", inline=True)
+        embed.add_field(
+            name="⭐ Level",
+            value=f"{user['level']} (Ascension {user['ascension']})",
+            inline=True,
+        )
+        _lvl, _exp, _asc = user["level"], user["experience"], user["ascension"]
+        try:
+            _exp_path = str(asset_path('exp.json'))
+            with open(_exp_path, encoding="utf-8") as _f:
+                _exp_table = json.load(_f)["levels"]
+            if _lvl >= 100:
+                # Mirrors ExperienceManager.add_experience's ascension threshold:
+                # exp_table["100"] scaled by the current ascension bracket.
+                _base = _exp_table.get("100", 0)
+                if _base <= 0:
+                    _exp_str = f"{_exp:,} *(MAX)*"
+                else:
+                    _bracket = (_asc // 100) + 1
+                    _needed = _base * _bracket
+                    _pct = min(99.9, _exp / _needed * 100)
+                    _exp_str = (
+                        f"{_exp:,} / {_needed:,}\n"
+                        f"*({_pct:.1f}% to Ascension {_asc + 1})*"
+                    )
+            else:
+                _needed = _exp_table.get(str(_lvl), 0)
+                if _needed <= 0:
+                    _exp_str = f"{_exp:,} *(MAX)*"
+                else:
+                    _pct = min(99.9, _exp / _needed * 100)
+                    _exp_str = (
+                        f"{_exp:,} / {_needed:,}\n*({_pct:.1f}% to Lv.{_lvl + 1})*"
+                    )
+        except Exception:
+            _exp_str = f"{_exp:,}"
+        embed.add_field(name="📈 Experience", value=_exp_str, inline=True)
+
+        embed.add_field(name="🏛️ Ideology", value=f"{user['ideology']}", inline=True)
+        embed.add_field(name="👥 Followers", value=f"{followers:,}", inline=True)
+        embed.add_field(
+            name=f"{GOLD_COIN} Gold", value=f"{user['gold']:,}", inline=True
+        )
+
+        return embed
+
+    @staticmethod
+    async def build_cooldowns(bot, user_id: str, server_id: str) -> discord.Embed:
+        user = await bot.database.users.get(user_id, server_id)
+        p = await load_player(user_id, user, bot.database)
+
+        embed = discord.Embed(title="Active Timers & Cooldowns", color=0xBEBEFE)
+        embed.set_thumbnail(url=user["appearance"])
+
+        player_level = user["level"]
+
+        def _fmt_ms(time_str, cooldown_td: timedelta) -> str:
+            if not time_str:
+                return "Ready!"
+            try:
+                total = int(
+                    (
+                        cooldown_td
+                        - (datetime.now() - datetime.fromisoformat(time_str))
+                    ).total_seconds()
+                )
+                if total <= 0:
+                    return "Ready!"
+                m = total // 60
+                return f"{m}m"
+            except Exception:
+                return "Ready!"
+
+        def _fmt_hms(time_str, cooldown_td: timedelta) -> str:
+            if not time_str:
+                return "Ready!"
+            try:
+                total = int(
+                    (
+                        cooldown_td
+                        - (datetime.now() - datetime.fromisoformat(time_str))
+                    ).total_seconds()
+                )
+                if total <= 0:
+                    return "Ready!"
+                h, r = divmod(total, 3600)
+                m = r // 60
+                return f"{h}h {m:02d}m"
+            except Exception:
+                return "Ready!"
+
+        def _secs_to_hm(secs: int) -> str:
+            h, r = divmod(max(0, secs), 3600)
+            m = r // 60
+            return f"{h}h {m:02d}m"
+
+        # ── Combat ───────────────────────────────────────────────────────────
+        combat_lines = []
+
+        # Stamina
+        MAX_STAMINA = 10
+        stamina_data = await bot.database.users.get_stamina(user_id)
+        stamina = stamina_data["combat_stamina"]
+        last_regen_str = stamina_data["last_stamina_regen"]
+
+        if stamina >= MAX_STAMINA:
+            combat_lines.append(f"⚡ **Stamina** — {stamina}/{MAX_STAMINA} (full)")
+        else:
+            regen_suffix = ""
+            if last_regen_str:
+                try:
+                    next_regen = datetime.fromisoformat(last_regen_str) + timedelta(
+                        hours=1
+                    )
+                    rem_secs = int((next_regen - datetime.now()).total_seconds())
+                    if rem_secs > 0:
+                        regen_suffix = f" · next in {rem_secs // 60}m"
+                except Exception:
+                    pass
+            cd_str = _fmt_ms(user["last_combat"], timedelta(minutes=10))
+            combat_lines.append(
+                f"⚡ **Stamina** — {stamina}/{MAX_STAMINA}{regen_suffix}"
+            )
+            if stamina == 0:
+                combat_lines.append(f"  ↳ Cooldown: {cd_str}")
+
+        # War Camp Stamina — separate accrual pool with its own dedicated
+        # collection timer (stacks past the 10-stamina cap when collected).
+        if player_level >= 10:
+            try:
+                from vtuber.rpg.idleology.core.settlement.mechanics import SettlementMechanics
+                from vtuber.rpg.idleology.core.settlement.models import Plot
+
+                settlement = await bot.database.settlement.get_settlement(
+                    user_id, server_id
+                )
+                has_war_camp = bool(
+                    settlement
+                    and any(
+                        b.building_type == "war_camp" for b in settlement.buildings
+                    )
+                )
+                ws_ts = settlement.last_war_camp_stamina_time if settlement else None
+                if has_war_camp and ws_ts:
+                    ws_hours = max(
+                        0.0,
+                        (datetime.now() - datetime.fromisoformat(ws_ts)).total_seconds()
+                        / 3600,
+                    )
+                    plot_rows = await bot.database.plots.get_plots(user_id, server_id)
+                    plots = [
+                        Plot(
+                            plot_index=r["plot_index"],
+                            is_developed=bool(r["is_developed"]),
+                            bonus_type=r["bonus_type"],
+                        )
+                        for r in plot_rows
+                    ]
+                    ws_stamina = min(
+                        10,
+                        int(
+                            SettlementMechanics.calculate_war_camp_stamina(
+                                settlement.buildings, plots, ws_hours
+                            )
+                        ),
+                    )
+                    if ws_stamina > 0:
+                        combat_lines.append(
+                            f"⚔️ **War Camp Stamina** — {ws_stamina}/10 ready to collect!"
+                        )
+                    else:
+                        combat_lines.append(
+                            "⚔️ **War Camp Stamina** — 0/10 accumulating"
+                        )
+            except Exception:
+                pass
+
+        # Rest
+        combat_lines.append(
+            f"🛏️ **Rest** — {_fmt_hms(user['last_rest_time'], timedelta(hours=2))}"
+        )
+
+        # Maw
+        try:
+            from vtuber.rpg.idleology.core.maw.mechanics import (
+                MAX_FIGHTS_PER_CYCLE,
+                fight_available,
+                fight_remaining_seconds,
+                get_current_cycle_id,
+                is_cycle_active,
+            )
+
+            now_utc = datetime.now(timezone.utc)
+            now_ts = int(now_utc.timestamp())
+            maw_cycle_id = get_current_cycle_id(now_utc)
+
+            if player_level >= 20:
+                if is_cycle_active(maw_cycle_id, now_ts):
+                    maw_record = await bot.database.maw.get_record(
+                        user_id, maw_cycle_id
+                    )
+                    if maw_record:
+                        fights_done = maw_record["fights_this_cycle"]
+                        last_fight_ts = maw_record["last_fight_ts"]
+                        fights_left = max(0, MAX_FIGHTS_PER_CYCLE - fights_done)
+                        if fights_done >= MAX_FIGHTS_PER_CYCLE:
+                            maw_str = f"All fights used (0/{MAX_FIGHTS_PER_CYCLE} left)"
+                        elif fight_available(last_fight_ts, fights_done, now_ts):
+                            maw_str = (
+                                f"Ready! ({fights_left}/{MAX_FIGHTS_PER_CYCLE} left)"
+                            )
+                        else:
+                            maw_str = (
+                                f"{_secs_to_hm(fight_remaining_seconds(last_fight_ts, now_ts))}"
+                                f" ({fights_left}/{MAX_FIGHTS_PER_CYCLE} left)"
+                            )
+                    else:
+                        maw_str = f"Not participated · {MAX_FIGHTS_PER_CYCLE} fights available"
+                else:
+                    maw_str = "No active cycle"
+                combat_lines.append(f"{INFINITE_MAW} **Maw** — {maw_str}")
+        except Exception:
+            pass
+
+        # Hatchery
+        try:
+            incubation = await bot.database.eggs.get_incubation(user_id, server_id)
+            if incubation:
+                start_dt = datetime.fromisoformat(incubation["start_time"])
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+                duration = incubation["duration_seconds"]
+                elapsed_secs = (datetime.now(timezone.utc) - start_dt).total_seconds()
+                remaining = max(0.0, duration - elapsed_secs)
+                if remaining > 0:
+                    rh, r = divmod(int(remaining), 3600)
+                    rm = r // 60
+                    pct = int(min(100, elapsed_secs / max(duration, 1) * 100))
+                    combat_lines.append(
+                        f"🐣 **Hatchery** — {incubation['monster_name']}: {rh}h {rm:02d}m ({pct}%)"
+                    )
+                else:
+                    combat_lines.append(
+                        f"🐣 **Hatchery** — {incubation['monster_name']}: Ready to hatch!"
+                    )
+        except Exception:
+            pass
+
+        # Apex Hunts
+        if player_level >= 90:
+            try:
+                from vtuber.rpg.idleology.core.apex.mechanics import MAX_CHARGES, ApexMechanics
+                from vtuber.rpg.idleology.core.apex.models import profile_from_db
+
+                apex_row = await bot.database.apex.get_or_create_profile(
+                    user_id, server_id
+                )
+                apex_profile = profile_from_db(apex_row)
+                charges, _ = ApexMechanics.calculate_charges(apex_profile)
+                if charges >= MAX_CHARGES:
+                    apex_str = f"{charges}/{MAX_CHARGES} (full)"
+                else:
+                    next_secs = ApexMechanics.seconds_until_next_charge(apex_profile)
+                    rh, r = divmod(next_secs, 3600)
+                    rm = r // 60
+                    apex_str = f"{charges}/{MAX_CHARGES} · next in {rh}h {rm:02d}m"
+                combat_lines.append(f"🏹 **Apex Hunts** — {apex_str}")
+            except Exception:
+                pass
+
+        embed.add_field(name="Combat", value="\n".join(combat_lines), inline=False)
+
+        # ── Daily ─────────────────────────────────────────────────────────────
+        daily_lines = []
+
+        quest_meta: dict = {}
+        try:
+            await bot.database.quests.ensure_meta(user_id)
+            quest_meta = await bot.database.quests.get_meta(user_id)
+        except Exception:
+            pass
+        checkin_last = quest_meta.get("checkin_last_time") if quest_meta else None
+
+        if player_level >= 10:
+            daily_lines.append(
+                f"📅 **Check-in** — {_fmt_hms(checkin_last, timedelta(hours=18))}"
+            )
+
+        # Quest Board
+        try:
+            from vtuber.rpg.idleology.core.quests.mechanics import get_board_cooldown_remaining
+
+            all_contracts = await bot.database.quests.get_contracts(user_id, server_id)
+            if all_contracts:
+                latest = max(
+                    all_contracts, key=lambda c: c.get("locked_at", ""), default=None
+                )
+                if latest and latest.get("locked_at"):
+                    rem = get_board_cooldown_remaining(latest["locked_at"])
+                    if rem.total_seconds() > 0:
+                        rh, rr = divmod(int(rem.total_seconds()), 3600)
+                        rm = rr // 60
+                        board_str = f"{rh}h {rm:02d}m"
+                    else:
+                        board_str = "Ready!"
+                else:
+                    board_str = "Ready!"
+            else:
+                board_str = "Ready!"
+            daily_lines.append(f"{QUEST_COMPLETE} **Quest Board** — {board_str}")
+        except Exception:
+            pass
+
+        if daily_lines:
+            embed.add_field(name="Daily", value="\n".join(daily_lines), inline=False)
+
+        # ── Settlement ────────────────────────────────────────────────────────
+        settlement_lines = []
+
+        if player_level >= 10:
+            try:
+                settlement = await bot.database.settlement.get_settlement(
+                    user_id, server_id
+                )
+                if settlement:
+                    # Production
+                    if settlement.last_collection_time:
+                        s_last = datetime.fromisoformat(settlement.last_collection_time)
+                        blocks = max(
+                            0, int((datetime.now() - s_last).total_seconds() // 3600)
+                        )
+                        settlement_lines.append(
+                            f"🏭 **Production** — {blocks} block(s) of production completed"
+                        )
+
+                    # Zeal
+                    if settlement.last_zeal_gather_time:
+                        try:
+                            from vtuber.rpg.idleology.core.settlement.constants import (
+                                PASSIVE_ZEAL_PER_HOUR_BASE,
+                                ZEAL_GATHER_CAP,
+                            )
+                            from vtuber.rpg.idleology.core.settlement.turn_engine import (
+                                passive_zeal_for_period,
+                            )
+
+                            tier = settlement.town_hall_tier
+                            rate = PASSIVE_ZEAL_PER_HOUR_BASE + (tier - 1) * 9
+                            _hours = max(
+                                0.0,
+                                (
+                                    datetime.now()
+                                    - datetime.fromisoformat(
+                                        settlement.last_zeal_gather_time
+                                    )
+                                ).total_seconds()
+                                / 3600,
+                            )
+                            available = min(
+                                passive_zeal_for_period(_hours, tier), ZEAL_GATHER_CAP
+                            )
+                            hours_to_cap = max(
+                                0.0, (ZEAL_GATHER_CAP - available) / rate
+                            )
+                            if available >= ZEAL_GATHER_CAP:
+                                zeal_str = f"**{available}/{ZEAL_GATHER_CAP}** — ready to collect!"
+                            elif hours_to_cap < 1.0:
+                                zeal_str = (
+                                    f"**{available}/{ZEAL_GATHER_CAP}** — cap in <1h"
+                                )
+                            else:
+                                h = int(hours_to_cap)
+                                zeal_str = (
+                                    f"**{available}/{ZEAL_GATHER_CAP}** — cap in ~{h}h"
+                                )
+                            settlement_lines.append(f"{ZEAL} **Zeal** — {zeal_str}")
+                        except Exception:
+                            pass
+
+                    # Development Contracts
+                    try:
+                        dc_crafted_today = (
+                            await bot.database.settlement.get_dc_crafted_today(
+                                user_id, server_id
+                            )
+                        )
+                        _dc_now = datetime.now()
+                        _next_midnight = _dc_now.replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        ) + timedelta(days=1)
+                        _dc_secs = int((_next_midnight - _dc_now).total_seconds())
+                        _dch, _dcr = divmod(_dc_secs, 3600)
+                        _dcm = _dcr // 60
+                        _dc_remaining = max(0, 10 - dc_crafted_today)
+                        settlement_lines.append(
+                            f"{DEVELOPMENT_CONTRACT} **DCs** — {_dc_remaining}/10 remaining · resets in {_dch}h {_dcm:02d}m"
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Propagate
+        settlement_lines.append(
+            f"💡 **Propagate** — {_fmt_hms(user['last_propagate_time'], timedelta(hours=18))}"
+        )
+
+        embed.add_field(
+            name="Settlement", value="\n".join(settlement_lines), inline=False
+        )
+
+        # ── Partners & Companions ─────────────────────────────────────────────
+        pc_lines = []
+
+        if player_level >= 10:
+            try:
+                from vtuber.rpg.idleology.core.models import Partner
+                from vtuber.rpg.idleology.core.partners.data import PARTNER_DATA
+                from vtuber.rpg.idleology.core.partners.dispatch import (
+                    BOSS_PARTY_DURATION_HOURS,
+                    elapsed_hours,
+                    get_cap_hours,
+                )
+
+                rows = await bot.database.partners.get_owned(user_id)
+                all_partners = [
+                    Partner.from_row(row, PARTNER_DATA[row["partner_id"]])
+                    for row in rows
+                    if row["partner_id"] in PARTNER_DATA
+                ]
+
+                active_dispatch = next(
+                    (
+                        partner
+                        for partner in all_partners
+                        if partner.is_dispatched
+                        and partner.dispatch_task
+                        and partner.dispatch_task != "boss_party"
+                    ),
+                    None,
+                )
+                boss_party = [
+                    partner
+                    for partner in all_partners
+                    if partner.dispatch_task == "boss_party"
+                    and (partner.is_dispatched or partner.dispatch_start_time)
+                ]
+
+                # Partner
+                if active_dispatch:
+                    elapsed = elapsed_hours(active_dispatch.dispatch_start_time)
+                    cap = get_cap_hours(active_dispatch)
+                    elapsed_h = min(int(cap), int(elapsed))
+                    task_label = (active_dispatch.dispatch_task or "unknown").title()
+                    if elapsed >= cap:
+                        pc_lines.append(
+                            f"📋 **Partner** — {int(cap)}/{int(cap)} hours of {task_label} completed (ready!)"
+                        )
+                    else:
+                        pc_lines.append(
+                            f"📋 **Partner** — {elapsed_h}/{int(cap)} hours of {task_label} completed"
+                        )
+                else:
+                    pc_lines.append("📋 **Partner** — No partner dispatched")
+
+                # Boss Raid
+                if boss_party:
+                    bp_elapsed = elapsed_hours(boss_party[0].dispatch_start_time)
+                    bp_cap = int(BOSS_PARTY_DURATION_HOURS)
+                    bp_done = min(bp_cap, int(bp_elapsed))
+                    if bp_done >= bp_cap:
+                        pc_lines.append(
+                            f"{UBER_EMOJI} **Boss Raid** — {bp_cap}/{bp_cap} hours completed (ready!)"
+                        )
+                    else:
+                        pc_lines.append(
+                            f"{UBER_EMOJI} **Boss Raid** — {bp_done}/{bp_cap} hours completed"
+                        )
+            except Exception:
+                pass
+
+        # Companions
+        if player_level >= 40:
+            try:
+                active_comps = await bot.database.companions.get_active(user_id)
+                if not active_comps:
+                    pc_lines.append("🐾 **Companions** — No companions deployed")
+                else:
+                    c_time_str = await bot.database.users.get_companion_collect_time(
+                        user_id
+                    )
+                    if c_time_str:
+                        from vtuber.rpg.idleology.core.companions.mastery import get_max_cycles
+
+                        mastery = await bot.database.companions.get_mastery(
+                            user_id, server_id
+                        )
+                        cap = get_max_cycles(mastery.get("nodes_owned", {}))
+                        c_diff = (
+                            datetime.now() - datetime.fromisoformat(c_time_str)
+                        ).total_seconds()
+                        cycles = min(cap, int(c_diff // 3600))
+                        if cycles >= cap:
+                            pc_lines.append(
+                                f"🐾 **Companions** — {cap}/{cap} adventures (ready to collect!)"
+                            )
+                        else:
+                            pc_lines.append(
+                                f"🐾 **Companions** — {cycles}/{cap} adventures completed"
+                            )
+                    else:
+                        pc_lines.append("🐾 **Companions** — Ready to deploy")
+            except Exception:
+                pass
+
+        if pc_lines:
+            embed.add_field(
+                name="Partners & Companions", value="\n".join(pc_lines), inline=False
+            )
+
+        # ── Gathering (contextual — only when gate is active) ─────────────────
+        try:
+            from vtuber.rpg.idleology.core.skills.mechanics import SkillMechanics
+
+            _skill_cfg = {
+                "mining": ("⛏️", "Mining", "pickaxe_tier"),
+                "fishing": ("🎣", "Fishing", "fishing_rod"),
+                "woodcutting": ("🪓", "Woodcutting", "axe_type"),
+            }
+            gathering_lines: list[str] = []
+            for sk, (emo, label, tool_col) in _skill_cfg.items():
+                fam_end, mom = await bot.database.skills.get_familiarization_state(
+                    user_id, server_id, sk
+                )
+                remaining = SkillMechanics.get_familiarization_remaining_seconds(
+                    fam_end, mom
+                )
+                if remaining > 0:
+                    skill_data = await bot.database.skills.get_data(
+                        user_id, server_id, sk
+                    )
+                    if skill_data and skill_data[tool_col] >= 5:
+                        continue
+                    gh, gr = divmod(remaining // 60, 60)
+                    gathering_lines.append(
+                        f"{emo} **{label}** — Familiarizing: {gh}h {gr:02d}m"
+                    )
+                elif fam_end:
+                    skill_data = await bot.database.skills.get_data(
+                        user_id, server_id, sk
+                    )
+                    if skill_data and skill_data[tool_col] >= 5:
+                        continue
+                    gathering_lines.append(
+                        f"{emo} **{label}** — ✅ Tool tier familiarized"
+                    )
+
+            if gathering_lines:
+                embed.add_field(
+                    name="Gathering", value="\n".join(gathering_lines), inline=False
+                )
+        except Exception:
+            pass
+
+        # ── Misc. ────────────────────────────────────────────────────────────
+        misc_lines = []
+
+        if player_level >= 10:
+            try:
+                from vtuber.rpg.idleology.core.nether_market.mechanics import MAX_CHARGES
+                from vtuber.rpg.idleology.core.nether_market.mechanics import NetherMarketMechanics as NMM
+
+                nm_profile = await bot.database.nether_market.get_or_create_profile(
+                    user_id, server_id
+                )
+                nm_regen_secs = NMM.get_charge_regen_seconds(
+                    nm_profile["mastery_nodes"]
+                )
+                nm_charges, _ = NMM.calculate_charges(
+                    nm_profile["plunder_charges"],
+                    nm_profile["last_charge_time"],
+                    nm_regen_secs,
+                )
+                if nm_charges >= MAX_CHARGES:
+                    nm_str = f"{nm_charges}/{MAX_CHARGES} (full)"
+                else:
+                    nm_next = NMM.seconds_until_next_charge(
+                        nm_profile["plunder_charges"],
+                        nm_profile["last_charge_time"],
+                        nm_regen_secs,
+                    )
+                    nh, nr = divmod(nm_next, 3600)
+                    nm_str = (
+                        f"{nm_charges}/{MAX_CHARGES} · next in {nh}h {nr // 60:02d}m"
+                    )
+                misc_lines.append(
+                    f"{NETHER_MARKET_PLUNDER} **Plunder Attempts** — {nm_str}"
+                )
+            except Exception:
+                pass
+
+        # Next server tick — hourly sweep that regenerates stamina, rerolls the
+        # Nether Market rotation, and grants passive skilling resources.
+        try:
+            tick_iterations = []
+            for cog_name, task_name in (
+                ("nether_market", "rotate_markets"),
+                ("skills", "schedule_skills"),
+            ):
+                cog = bot.get_cog(cog_name)
+                loop_task = getattr(cog, task_name, None) if cog else None
+                next_iter = getattr(loop_task, "next_iteration", None)
+                if next_iter:
+                    tick_iterations.append(next_iter)
+            if tick_iterations:
+                next_tick = min(tick_iterations)
+                tick_secs = max(
+                    0, int((next_tick - datetime.now(timezone.utc)).total_seconds())
+                )
+                th, tr = divmod(tick_secs, 3600)
+                misc_lines.append(
+                    f"⏳ **Next Server Tick** — {th}h {tr // 60:02d}m "
+                    "(stamina, market refresh, skilling resources)"
+                )
+        except Exception:
+            pass
+
+        if misc_lines:
+            embed.add_field(name="Misc.", value="\n".join(misc_lines), inline=False)
+
+        return embed

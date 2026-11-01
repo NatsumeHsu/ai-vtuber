@@ -1,0 +1,316 @@
+import json
+import random
+
+import aiosqlite
+
+from vtuber.rpg.idleology.core.models import CodexTome
+
+# Passive types available for tomes
+TOME_PASSIVE_TYPES = [
+    "vitality",
+    "wrath",
+    "bastion",
+    "tenacity",
+    "bloodthirst",
+    "providence",
+    "precision",
+    "affluence",
+    "bulwark",
+    "resilience",
+]
+
+# Value ranges per (passive_type, tier). Each tier has a (min, max) tuple.
+# When upgrading to a tier, a float is rolled in this range.
+TOME_TIER_RANGES: dict[str, list[tuple[float, float]]] = {
+    # tier index 0 = tier 1, index 4 = tier 5
+    "vitality": [(3.0, 7.0), (6.0, 14.0), (10.0, 22.0), (14.0, 30.0), (18.0, 40.0)],
+    "wrath": [(3.0, 8.0), (6.0, 15.0), (10.0, 24.0), (14.0, 32.0), (18.0, 42.0)],
+    "bastion": [(3.0, 8.0), (6.0, 15.0), (10.0, 24.0), (14.0, 32.0), (18.0, 42.0)],
+    "tenacity": [(2.0, 5.0), (4.0, 9.0), (6.0, 14.0), (9.0, 19.0), (12.0, 25.0)],
+    "bloodthirst": [
+        (0.02, 0.05),
+        (0.04, 0.09),
+        (0.06, 0.14),
+        (0.09, 0.19),
+        (0.12, 0.25),
+    ],
+    "providence": [(3.0, 8.0), (6.0, 15.0), (10.0, 24.0), (14.0, 32.0), (18.0, 42.0)],
+    "precision": [(1.0, 3.0), (2.0, 5.0), (3.0, 8.0), (5.0, 11.0), (7.0, 15.0)],
+    "affluence": [(3.0, 8.0), (6.0, 15.0), (10.0, 24.0), (14.0, 32.0), (18.0, 42.0)],
+    "bulwark": [(1.0, 3.0), (2.0, 5.0), (3.0, 8.0), (5.0, 11.0), (7.0, 15.0)],
+    "resilience": [(1.0, 8.0), (3.0, 12.0), (5.0, 18.0), (7.0, 25.0), (8.0, 40.0)],
+}
+
+# Fragment cost to upgrade from tier N-1 to tier N (index 0 = unlock tier 1)
+TOME_UPGRADE_COSTS = [5, 10, 20, 40, 80]
+
+# Gold cost to upgrade from tier N to tier N+1 (index 0 = T0→T1, index 4 = T4→T5)
+TOME_GOLD_COSTS = [1_000_000, 2_000_000, 3_000_000, 5_000_000, 10_000_000]
+
+# Gold cost to reroll a tome's stat value at tier N (index 0 = tier 1, index 4 = tier 5)
+REROLL_GOLD_COSTS = [1_000_000, 2_000_000, 3_000_000, 4_000_000, 10_000_000]
+
+
+# Reroll fragment cost is 50% of the current tier's upgrade cost (minimum 3)
+def get_reroll_cost(tier: int) -> int:
+    if tier == 0 or tier > 5:
+        return 0
+    return max(3, TOME_UPGRADE_COSTS[tier - 1] // 2)
+
+
+def get_reroll_gold_cost(tier: int) -> int:
+    """Gold cost to reroll a tome's stat value at the given tier (1-5)."""
+    if tier == 0 or tier > 5:
+        return 0
+    return REROLL_GOLD_COSTS[tier - 1]
+
+
+def roll_tome_value(passive_type: str, tier: int) -> float:
+    """Roll a stat value in the range for the given passive type and tier (1-5).
+    Uses a triangular distribution weighted towards the lower end of the range.
+    Resilience is always returned as a whole number (FDR is integer-only)."""
+    lo, hi = TOME_TIER_RANGES[passive_type][tier - 1]
+    value = round(random.triangular(lo, hi, lo), 2)
+    if passive_type == "resilience":
+        return float(round(value))
+    return value
+
+
+class CodexRepository:
+    def __init__(self, connection: aiosqlite.Connection):
+        self.connection = connection
+
+    # ------------------------------------------------------------------
+    # Tomes
+    # ------------------------------------------------------------------
+
+    async def get_tomes(self, user_id: str) -> list[CodexTome]:
+        cursor = await self.connection.execute(
+            "SELECT slot, passive_type, tier, value FROM codex_tomes WHERE user_id = ? ORDER BY slot",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            CodexTome(
+                slot=r["slot"],
+                passive_type=r["passive_type"],
+                tier=r["tier"],
+                value=r["value"],
+            )
+            for r in rows
+        ]
+
+    async def get_unlocked_slots(self, user_id: str) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COUNT(*) AS cnt FROM codex_tomes WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return row["cnt"] if row else 0
+
+    async def _get_owned_passive_types(self, user_id: str) -> set[str]:
+        """Returns the set of passive_types already present in this player's tome slots."""
+        cursor = await self.connection.execute(
+            "SELECT passive_type FROM codex_tomes WHERE user_id = ?",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return {r["passive_type"] for r in rows}
+
+    async def unlock_tome_slot(self, user_id: str) -> CodexTome | None:
+        """
+        Consume one codex page to open the next tome slot with a random passive type.
+        Returns the new CodexTome, or None if all 5 slots are already unlocked.
+        The new passive type is guaranteed not to duplicate any existing slot.
+        """
+        unlocked = await self.get_unlocked_slots(user_id)
+        if unlocked >= 5:
+            return None
+
+        owned = await self._get_owned_passive_types(user_id)
+        candidates = [t for t in TOME_PASSIVE_TYPES if t not in owned]
+        # Fallback in the unlikely case all types are taken (shouldn't happen: 10 types, 5 slots)
+        passive_type = random.choice(candidates if candidates else TOME_PASSIVE_TYPES)
+        slot = unlocked  # slots 0-4
+
+        await self.connection.execute(
+            "INSERT INTO codex_tomes (user_id, slot, passive_type, tier, value) VALUES (?, ?, ?, 0, 0.0)",
+            (user_id, slot, passive_type),
+        )
+        await self.connection.commit()
+        return CodexTome(slot=slot, passive_type=passive_type, tier=0, value=0.0)
+
+    async def upgrade_tome(self, user_id: str, slot: int) -> tuple[bool, float]:
+        """
+        Upgrade a tome slot to the next tier, rolling a new value in range.
+        Returns (success, new_value). Fails if already tier 5.
+        """
+        cursor = await self.connection.execute(
+            "SELECT tier, passive_type FROM codex_tomes WHERE user_id = ? AND slot = ?",
+            (user_id, slot),
+        )
+        row = await cursor.fetchone()
+        if not row or row["tier"] >= 5:
+            return False, 0.0
+
+        current_tier, passive_type = row["tier"], row["passive_type"]
+        new_tier = current_tier + 1
+        new_value = roll_tome_value(passive_type, new_tier)
+
+        await self.connection.execute(
+            "UPDATE codex_tomes SET tier = ?, value = ? WHERE user_id = ? AND slot = ?",
+            (new_tier, new_value, user_id, slot),
+        )
+        await self.connection.commit()
+        return True, new_value
+
+    async def reroll_tome_value(self, user_id: str, slot: int) -> tuple[bool, float]:
+        """
+        Reroll the stat value for the current tier without changing the tier.
+        Returns (success, new_value). Fails if tome is at tier 0.
+        """
+        cursor = await self.connection.execute(
+            "SELECT tier, passive_type FROM codex_tomes WHERE user_id = ? AND slot = ?",
+            (user_id, slot),
+        )
+        row = await cursor.fetchone()
+        if not row or row["tier"] == 0:
+            return False, 0.0
+
+        tier, passive_type = row["tier"], row["passive_type"]
+        new_value = roll_tome_value(passive_type, tier)
+
+        await self.connection.execute(
+            "UPDATE codex_tomes SET value = ? WHERE user_id = ? AND slot = ?",
+            (new_value, user_id, slot),
+        )
+        await self.connection.commit()
+        return True, new_value
+
+    async def reroll_tome_type(self, user_id: str, slot: int) -> tuple[bool, str]:
+        """
+        Reroll the passive type on a tome slot, resetting tier and value to 0.
+        Returns (success, new_passive_type).
+        """
+        cursor = await self.connection.execute(
+            "SELECT passive_type FROM codex_tomes WHERE user_id = ? AND slot = ?",
+            (user_id, slot),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return False, ""
+
+        current_type = row["passive_type"]
+        owned = await self._get_owned_passive_types(user_id)
+        # Exclude every type currently in any slot (other slots + current slot itself)
+        candidates = [t for t in TOME_PASSIVE_TYPES if t not in owned]
+        # Fallback: if somehow no unique types remain, at least avoid the current slot's type
+        if not candidates:
+            candidates = [t for t in TOME_PASSIVE_TYPES if t != current_type]
+        new_type = random.choice(candidates)
+
+        await self.connection.execute(
+            "UPDATE codex_tomes SET passive_type = ?, tier = 0, value = 0.0 WHERE user_id = ? AND slot = ?",
+            (new_type, user_id, slot),
+        )
+        await self.connection.commit()
+        return True, new_type
+
+    # ------------------------------------------------------------------
+    # Chapter progress
+    # ------------------------------------------------------------------
+
+    async def log_chapter_clear(
+        self, user_id: str, chapter_id: int, perfect: bool = False
+    ):
+        await self.connection.execute(
+            """INSERT INTO codex_progress (user_id, chapter_id, clears, perfect_clears)
+               VALUES (?, ?, 1, ?)
+               ON CONFLICT(user_id, chapter_id) DO UPDATE SET
+                   clears = clears + 1,
+                   perfect_clears = perfect_clears + ?""",
+            (user_id, chapter_id, int(perfect), int(perfect)),
+        )
+        await self.connection.commit()
+
+    async def log_perfect_run(self, user_id: str, chapter_ids: list[int]):
+        """Increments perfect_clears for each chapter cleared in a perfect run.
+        Called separately from log_chapter_clear so clears aren't double-counted."""
+        for chapter_id in chapter_ids:
+            await self.connection.execute(
+                """UPDATE codex_progress SET perfect_clears = perfect_clears + 1
+                   WHERE user_id = ? AND chapter_id = ?""",
+                (user_id, chapter_id),
+            )
+        await self.connection.commit()
+
+    async def get_chapter_clears(self, user_id: str) -> dict[int, dict]:
+        """Returns {chapter_id: {'clears': int, 'perfect_clears': int}}."""
+        cursor = await self.connection.execute(
+            "SELECT chapter_id, clears, perfect_clears FROM codex_progress WHERE user_id = ?",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+        return {
+            r["chapter_id"]: {
+                "clears": r["clears"],
+                "perfect_clears": r["perfect_clears"],
+            }
+            for r in rows
+        }
+
+    # ------------------------------------------------------------------
+    # Persisted runs (chapter-boundary save state, distillation pattern)
+    # Snapshot is stored as JSON in the `data` column.
+    # ------------------------------------------------------------------
+
+    async def get_run(self, user_id: str, server_id: str) -> dict | None:
+        """Returns the saved run snapshot dict, or None."""
+        async with self.connection.execute(
+            "SELECT data FROM codex_runs WHERE user_id = ? AND server_id = ?",
+            (user_id, server_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row or not row["data"]:
+            return None
+        return json.loads(row["data"])
+
+    async def upsert_run(self, user_id: str, server_id: str, data: dict) -> None:
+        """Create or update the saved run for this user/server."""
+        await self.connection.execute(
+            """INSERT INTO codex_runs (user_id, server_id, data)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id, server_id) DO UPDATE SET
+                   data = excluded.data""",
+            (user_id, server_id, json.dumps(data)),
+        )
+        await self.connection.commit()
+
+    async def delete_run(self, user_id: str, server_id: str) -> None:
+        """Clear the saved run (completion or abandon)."""
+        await self.connection.execute(
+            "DELETE FROM codex_runs WHERE user_id = ? AND server_id = ?",
+            (user_id, server_id),
+        )
+        await self.connection.commit()
+
+    # ------------------------------------------------------------------
+    # First-clear unlock flag (one-time Inner Sanctum Points reward)
+    # ------------------------------------------------------------------
+
+    async def has_first_clear(self, user_id: str, server_id: str) -> bool:
+        async with self.connection.execute(
+            "SELECT has_first_clear FROM codex_progress_meta WHERE user_id = ? AND server_id = ?",
+            (user_id, server_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return bool(row and row["has_first_clear"])
+
+    async def set_first_clear(self, user_id: str, server_id: str) -> None:
+        await self.connection.execute(
+            """INSERT INTO codex_progress_meta (user_id, server_id, has_first_clear)
+               VALUES (?, ?, 1)
+               ON CONFLICT(user_id, server_id) DO UPDATE SET
+                   has_first_clear = 1""",
+            (user_id, server_id),
+        )
+        await self.connection.commit()

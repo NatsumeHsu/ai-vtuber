@@ -1,0 +1,18 @@
+{
+  "rpg": "冒險", "help": "玩法說明", "register": "建立角色", "profile": "角色",
+  "inventory": "背包", "combat": "戰鬥", "package": "升級配點", "link": "綁定帳號",
+  "alchemy": "鍊金", "apex": "巔峰狩獵", "soul": "靈魂石", "ascent": "昇華之塔",
+  "card": "冒險者證", "stats": "角色能力", "allocate_stats": "分配能力", "leaderboard": "排行榜",
+  "passives": "被動效果", "redeem_code": "兌換序號", "codex": "秘典", "dojo": "訓練場",
+  "companions": "靈獸", "consume": "吞噬", "hematurgy": "血術", "curios": "奇物",
+  "delve": "深層礦坑", "duel": "決鬥", "setup_events": "設定事件頻道", "tutorial": "新手引導",
+  "unregister": "註銷角色", "hallofirsts": "先驅殿堂", "ideology": "信念", "propagate": "傳揚信念",
+  "inner_sanctum": "心靈聖所", "gear": "裝備總覽", "resources": "資源", "weapons": "武器",
+  "armor": "護甲", "accessory": "飾品", "gloves": "手套", "boots": "靴子", "helmets": "頭盔",
+  "loadouts": "配裝", "journey": "冒險旅程", "maw": "無盡巨口", "nether": "幽界市集",
+  "paradise": "樂園", "partner": "夥伴", "prestige": "榮耀", "quests": "任務",
+  "rite": "匯流儀式", "player_settings": "遊戲設定", "settlement": "聚落", "hatchery": "孵育所",
+  "black_market": "黑市", "gather": "採集", "fish": "釣魚", "chop": "伐木",
+  "slayer": "獵魔委託", "shop": "商店", "rest": "休息", "gamble": "小賭一下",
+  "checkin": "簽到", "trade": "交易", "uber": "極限首領"
+}

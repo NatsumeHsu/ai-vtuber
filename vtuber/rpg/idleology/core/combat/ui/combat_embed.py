@@ -1,0 +1,804 @@
+"""
+core/combat/ui/combat_embed.py — In-fight embed builders.
+
+Provides:
+  get_hp_display      — Formats HP string for display
+  build_status_text   — Player status sidebar (potions, buffs, stacks)
+  create_combat_embed — Main battle embed shown each turn
+"""
+
+from typing import Dict
+
+import discord
+
+from vtuber.rpg.idleology.core.character.prestige_display import format_prestige_name
+from vtuber.rpg.idleology.core.emojis import (
+    ALCHEMY_PASSIVE_EMOJI,
+    HEMATURGY_PASSIVE_EMOJI,
+    INFERNAL_ENGRAM,
+    JEWEL_SKILL_EMOJI,
+    MOD_CORROSION,
+    MOD_FLASHFIRE,
+    MOD_HEMORRHAGE,
+    MOD_PRESSURE_SURGE,
+    STAT_ATK,
+    STAT_DEF,
+    STAT_FDR,
+    STAT_HP,
+    STAT_PDR,
+    STAT_WARD,
+    UBER_EMOJI,
+    VOID_ENGRAM,
+)
+from vtuber.rpg.idleology.core.models import Monster, Player
+
+
+def get_hp_display(current: int, max_hp: int, ward: int) -> str:
+    """Formats HP string, e.g., '100/100 [hp] (50 [ward])' or '100/100 [hp] (~1.2k [ward])'"""
+    display = f"{current}/{max_hp} {STAT_HP}"
+    if ward > 0:
+        ward_str = _format_ward(ward)
+        display += f" ({ward_str} {STAT_WARD})"
+    return display
+
+
+def _format_ward(n: int) -> str:
+    """Format ward with ~ and k/m/b suffix for large values."""
+    if n < 1000:
+        return str(n)
+
+    if n < 1_000_000:
+        val = n / 1000
+        prec = 1 if n < 10_000 else 0
+        suffix = "k"
+    elif n < 1_000_000_000:
+        val = n / 1_000_000
+        prec = 1 if n < 10_000_000 else 0
+        suffix = "m"
+    elif n < 1_000_000_000_000:
+        val = n / 1_000_000_000
+        prec = 1 if n < 10_000_000_000 else 0
+        suffix = "b"
+    else:
+        # Extremely large (trillions+)
+        return f"~{n}"
+
+    if prec == 1:
+        formatted = f"{val:.1f}"
+    else:
+        formatted = f"{val:.0f}"
+
+    if formatted.endswith(".0"):
+        formatted = formatted[:-2]
+
+    return f"~{formatted}{suffix}"
+
+
+def build_status_text(player: Player, monster: Monster | None = None) -> str:
+    lines: list[str] = []
+
+    # --- Paradise Jewel ---
+    jop = getattr(player, "jewel_of_paradise", None)
+    if jop and jop.get("equipped_skill"):
+        from vtuber.rpg.idleology.core.paradise import mechanics as M
+        from vtuber.rpg.idleology.core.paradise.data import SKILL_JEWELS
+
+        skill_key = jop["equipped_skill"]
+        defn = SKILL_JEWELS.get(skill_key)
+        charges = jop.get("skill_charges", {}).get(skill_key, 0)
+        mastery = M.mastery_bonus(jop)
+        eff_lvl = M.get_effective_level(skill_key, jop, mastery)
+        threshold = M.get_effective_threshold(skill_key, jop, eff_lvl)
+        emoji = defn.emoji if defn else "💎"
+        name = defn.name if defn else skill_key.title()
+        lines.append(f"{emoji} **{name}**  {charges} / {threshold}")
+
+        if skill_key == "cataclysm" and player.jewel_cataclysm_primed:
+            lines.append(f"{JEWEL_SKILL_EMOJI['cataclysm']} Cataclysm  **PRIMED**")
+        if skill_key == "onslaught" and player.jewel_onslaught_primed:
+            lines.append(
+                f"{JEWEL_SKILL_EMOJI['onslaught']} Onslaught  **PRIMED** (+{player.jewel_onslaught_bonus_pct:.0f}%)"
+            )
+        if skill_key == "wardforge" and player.jewel_wardforge_bonus_dmg > 0:
+            lines.append(
+                f"{JEWEL_SKILL_EMOJI['wardforge']} Wardforge  +{player.jewel_wardforge_bonus_dmg:,} pending"
+            )
+        if skill_key == "acrimony" and player.jewel_acrimony_dot > 0:
+            lines.append(
+                f"{JEWEL_SKILL_EMOJI['acrimony']} Acrimony DoT  {player.jewel_acrimony_dot_dmg:,}/turn"
+                f"  · {player.jewel_acrimony_dot}t left"
+            )
+
+    # --- Alchemy: timed buffs — one consolidated row of icon + remaining
+    # duration each; full descriptions live in the Potion Lab, not here.
+    alchemy_parts: list[str] = []
+    if player.alchemy_hit_boost_pct > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['accel']}{player.alchemy_hit_boost_turns}t"
+        )
+    if player.alchemy_atk_boost_pct > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['enrage']}{player.alchemy_def_boost_turns}t"
+        )
+    if player.alchemy_eclipse_strikes > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['eclipse']}{player.alchemy_eclipse_strikes}t"
+        )
+    if player.alchemy_shield_hp > 0:
+        dur_str = (
+            f"{player.alchemy_shield_turns}t" if player.alchemy_shield_turns > 0 else ""
+        )
+        alchemy_parts.append(f"{ALCHEMY_PASSIVE_EMOJI['aegis']}{dur_str}")
+    if player.alchemy_enfeeble_turns > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['enfeeble']}{player.alchemy_enfeeble_turns}t"
+        )
+    if player.alchemy_dmg_reduction_turns > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['painkiller']}{player.alchemy_dmg_reduction_turns}t"
+        )
+    if player.alchemy_linger_turns > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['quench']}{player.alchemy_linger_turns}t"
+        )
+    if player.alchemy_viper_dot_turns > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['viper']}{player.alchemy_viper_dot_turns}t"
+        )
+    if player.alchemy_barrier_turns > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['barrier']}{player.alchemy_barrier_turns}t"
+        )
+    if player.alchemy_blood_tithe_hits > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['blood_tithe']}{player.alchemy_blood_tithe_hits}t"
+        )
+    if player.alchemy_ailment_immunity_turns > 0:
+        alchemy_parts.append(
+            f"{ALCHEMY_PASSIVE_EMOJI['panacea']}{player.alchemy_ailment_immunity_turns}t"
+        )
+    if alchemy_parts:
+        lines.append(f"**Alchemy**  {'  '.join(alchemy_parts)}")
+
+    # --- Weapon / accessory stacks ---
+    if player.voracious_stacks > 0:
+        lines.append(f"{INFERNAL_ENGRAM} Voracious  ×{player.voracious_stacks}")
+    if player.gaze_stacks > 0:
+        lines.append(f"👁️ Void Gaze  {player.gaze_stacks}/30")
+    if player.hunger_stacks > 0:
+        lines.append(f"{VOID_ENGRAM} Hunger  {player.hunger_stacks}/10")
+
+    # --- Lucifer PDR burst (ward-shatter bonus) ---
+    if player.lucifer_pdr_burst > 0:
+        lines.append(f"{INFERNAL_ENGRAM} PDR Burst  +{player.lucifer_pdr_burst}%")
+
+    # --- Hematurgy passive states — one consolidated row of icon + stack/
+    # counter value each; full descriptions live in the Hematurgy hub.
+    hp = getattr(player, "hematurgy_passives", None)
+    if hp:
+        cs = player.cs
+        hema_parts: list[str] = []
+
+        if "iron_momentum" in hp and cs.hema_momentum_stacks > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['iron_momentum']}{cs.hema_momentum_stacks}/5"
+            )
+
+        if "serrated" in hp and cs.hema_serrated_total > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['serrated']}−{cs.hema_serrated_total}"
+            )
+
+        if "haemorrhage" in hp and cs.hema_bleed_total > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['haemorrhage']}{cs.hema_bleed_total:,}"
+            )
+
+        if "chain_reaction" in hp and cs.hema_chain_stacks > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['chain_reaction']}{cs.hema_chain_stacks}/5"
+            )
+
+        if "phantom_reflex" in hp and cs.hema_phantom_stacks > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['phantom_reflex']}{cs.hema_phantom_stacks}/2"
+            )
+
+        if "executioners_rite" in hp and monster is not None:
+            if monster.max_hp > 0 and monster.hp / monster.max_hp < 0.30:
+                hema_parts.append(f"{HEMATURGY_PASSIVE_EMOJI['executioners_rite']}")
+
+        if "fevered_strike" in hp and cs.hema_fevered_count > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['fevered_strike']}×{cs.hema_fevered_count}"
+            )
+
+        if "predators_mark" in hp and cs.hema_predators_mark:
+            hema_parts.append(f"{HEMATURGY_PASSIVE_EMOJI['predators_mark']}")
+
+        if "flash_frost" in hp and cs.hema_frost_misses > 0:
+            from vtuber.rpg.idleology.core.hematurgy.mechanics import tier_val as _hema_tv
+
+            threshold = int(_hema_tv("flash_frost", hp["flash_frost"]))
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['flash_frost']}{cs.hema_frost_misses}/{threshold}"
+            )
+
+        if "spectral_waltz" in hp and cs.hema_blade_count > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['spectral_waltz']}×{cs.hema_blade_count}"
+            )
+
+        if "defiance" in hp and cs.hema_defiance_triggered:
+            hema_parts.append(f"{HEMATURGY_PASSIVE_EMOJI['defiance']}")
+
+        if "puncture" in hp and cs.hema_puncture_bleed > 0:
+            hema_parts.append(
+                f"{HEMATURGY_PASSIVE_EMOJI['puncture']}{cs.hema_puncture_bleed:,}"
+            )
+
+        if hema_parts:
+            lines.append(f"**Hema**  {'  '.join(hema_parts)}")
+
+    return "\n".join(lines)
+
+
+def build_afflictions_text(player: Player, monster: Monster) -> str:
+    """Returns a string of active player-facing debuffs from monster modifiers.
+    Only shows entries relevant to the player (risk indicators / stat penalties)."""
+    lines: list[str] = []
+
+    if monster.has_modifier("Flashfire") and monster.flashfire_charges > 0:
+        lines.append(f"{MOD_FLASHFIRE} Flashfire  {monster.flashfire_charges}/8")
+
+    if monster.has_modifier("Hemorrhage") and monster.bleed_stacks > 0:
+        v = monster.get_modifier_value("Hemorrhage")
+        bleed_per_turn = int(player.total_max_hp * v * monster.bleed_stacks)
+        lines.append(
+            f"{MOD_HEMORRHAGE} Hemorrhage  {monster.bleed_stacks} stacks  ({bleed_per_turn:,}/turn)"
+        )
+
+    if monster.has_modifier("Pressure Surge") and monster.pressure_stacks > 0:
+        lines.append(f"{MOD_PRESSURE_SURGE} Pressure  {monster.pressure_stacks}/10")
+
+    if monster.has_modifier("Corrosion") and monster.corrode_stacks > 0:
+        pdr_loss = monster.corrode_stacks * int(monster.get_modifier_value("Corrosion"))
+        lines.append(
+            f"{MOD_CORROSION} Corroded  {monster.corrode_stacks} stacks  (−{pdr_loss} PDR)"
+        )
+
+    if monster.has_modifier("Impending Doom") and monster.doom_stacks > 0:
+        doom_threshold = int(monster.get_modifier_value("Impending Doom"))
+        lines.append(f"☠️ Doom  {monster.doom_stacks}/{doom_threshold}")
+
+    if monster.has_modifier("Temporal Collapse") and monster.temporal_window_damage > 0:
+        lines.append(f"⏳ Temporal  {monster.temporal_window_damage:,} pending")
+
+    if (
+        monster.has_modifier("Death Rattle")
+        and monster.death_rattle_triggered
+        and monster.death_rattle_countdown > 0
+    ):
+        lines.append(f"☠️ Death Rattle  {monster.death_rattle_countdown} turns")
+
+    if monster.has_modifier("Undying Resolve") and monster.undying_immune_turns > 0:
+        lines.append(f"💀 Undying  immune {monster.undying_immune_turns}t")
+
+    if monster.has_modifier("Unbreakable"):
+        threshold = int(monster.get_modifier_value("Unbreakable"))
+        lines.append(f"💥 Unbreakable  {monster.unbreakable_charges}/{threshold}")
+
+    if monster.has_modifier("Judgment"):
+        threshold = int(monster.get_modifier_value("Judgment"))
+        lines.append(f"⚖️ Judgment  {monster.judgment_charges}/{threshold}")
+
+    return "\n".join(lines)
+
+
+def static_layout_view(container: discord.ui.Container) -> discord.ui.LayoutView:
+    """A bare, non-interactive LayoutView wrapping a single Container — used
+    to display final content on a message with no callbacks to dispatch."""
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(container)
+    return view
+
+
+async def freeze_and_handoff(
+    message: discord.Message, embed: discord.Embed, next_view=None
+) -> discord.Message:
+    """Sends `embed` (+ `next_view`, a classic BaseView) as a NEW message,
+    points `next_view.message` at it, then deletes `message`.
+
+    Discord's IS_COMPONENTS_V2 flag can never be removed once set on a
+    message, so once CombatView has rendered a message as a LayoutView, any
+    hand-off to a classic BaseView-based screen (UberReturnView,
+    ApexLobbyView, ...) must happen on a fresh message rather than editing
+    the old one. The old message is deleted rather than left behind — it
+    has no further purpose once the new one is up, and leaving it around
+    (still showing its last combat frame, possibly with stale-looking
+    buttons) reads as broken rather than as a deliberate transition.
+    """
+    new_message = await message.channel.send(embed=embed, view=next_view)
+    if next_view is not None:
+        next_view.message = new_message
+    try:
+        await message.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+    return new_message
+
+
+async def handoff_to_layout(
+    message: discord.Message, next_view: discord.ui.LayoutView
+) -> discord.Message:
+    """Sends `next_view` (a BaseLayoutView) as a NEW message, points
+    `next_view.message` at it, then deletes `message`.
+
+    Mirror of `freeze_and_handoff` for the opposite direction: editing a
+    message that currently has embeds/content into one carrying the
+    IS_COMPONENTS_V2 flag is rejected by Discord's API unless every legacy
+    field (content/embed/embeds/attachments) is explicitly nulled out, so a
+    classic BaseView screen handing back to a LayoutView (e.g. an Uber boss
+    lobby's "Back" button returning to UberHubView) must land on a fresh
+    message instead of editing the old one.
+    """
+    new_message = await message.channel.send(view=next_view)
+    next_view.message = new_message
+    try:
+        await message.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+    return new_message
+
+
+# Discord caps combined TextDisplay content at 4000 characters across the
+# *whole* Components V2 message (not per-component). Classic embeds had far
+# more headroom (6000 across title/description/fields), so content built for
+# the old format can exceed this when re-rendered — leave some margin below
+# the true cap for the header/footer overhead this adapter always adds.
+_V2_TEXT_BUDGET = 3800
+
+
+def embed_to_container(embed: discord.Embed) -> discord.ui.Container:
+    """Wraps a classic discord.Embed's content into a single Components V2
+    Container, preserving title/description/fields/thumbnail/image/footer/color.
+
+    Discord's IS_COMPONENTS_V2 message flag is permanent once set on a
+    message — every later edit to that message must supply components,
+    never content/embeds. CombatView's own terminal frames (defeat/victory
+    embeds built elsewhere by defeat_screen.py/victory_screen.py) still
+    return classic Embeds; this adapter re-renders them for a message
+    CombatView has already turned into a LayoutView, without needing to
+    touch those builders.
+    """
+    children: list = []
+    budget = _V2_TEXT_BUDGET
+
+    def _take(text: str) -> str | None:
+        """Returns `text`, truncated to fit the remaining budget, or None if
+        the budget is already exhausted (caller should stop adding content)."""
+        nonlocal budget
+        if budget <= 0:
+            return None
+        if len(text) > budget:
+            text = text[: max(0, budget - 1)].rstrip() + "…"
+        budget -= len(text)
+        return text
+
+    header_lines = []
+    if embed.title:
+        header_lines.append(f"## {embed.title}")
+    if embed.description:
+        header_lines.append(embed.description)
+    header_text = "\n".join(header_lines) if header_lines else None
+    if header_text:
+        header_text = _take(header_text)
+
+    def _bold(name: str) -> str:
+        # Some callers already wrap all or part of the field name in
+        # markdown bold themselves (e.g. "**Aphrodite**" or the emoji-
+        # prefixed "⚔️ **Gear**") — re-wrapping produces broken nested "**"
+        # markup, so only add it when the name has no bold markers at all.
+        if "**" in name:
+            return name
+        return f"**{name}**"
+
+    def _field_line(f) -> str:
+        value = f.value or ""
+        label = _bold(f.name)
+        # Single-line values read better packed as "Name: value"; multi-line
+        # values (lists, multi-stat blocks) keep the header on its own line.
+        if "\n" in value:
+            return f"{label}\n{value}"
+        return f"{label}: {value}"
+
+    # Group consecutive *single-line* inline fields (mirrors Discord's own
+    # inline-field packing, e.g. Experience/Gold side by side) so short
+    # stats share one component instead of each claiming a full paragraph.
+    # Fields with multi-line values (stat blocks, item lists) are never
+    # grouped — joining multi-line blocks with a text separator has no way
+    # to keep them visually apart, so the last line of one field and the
+    # first line of the next would run together on the same row.
+    fields = embed.fields
+    raw_field_texts: list[str] = []
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        if field.inline and "\n" not in (field.value or ""):
+            group = [field]
+            i += 1
+            while (
+                i < len(fields)
+                and fields[i].inline
+                and "\n" not in (fields[i].value or "")
+                and len(group) < 3
+            ):
+                group.append(fields[i])
+                i += 1
+            raw_field_texts.append("   ".join(_field_line(f) for f in group))
+        else:
+            raw_field_texts.append(_field_line(field))
+            i += 1
+
+    # Apply the character budget up front, in field order, before deciding
+    # which pieces get packed into the thumbnail Section below — otherwise
+    # section-packed text would bypass the budget check entirely.
+    field_texts: list[str] = []
+    ran_out = False
+    for text in raw_field_texts:
+        text = _take(text)
+        if text is None:
+            ran_out = True
+            break
+        field_texts.append(text)
+
+    thumb_url = embed.thumbnail.url if embed.thumbnail else None
+    packed_field_count = 0
+    if thumb_url:
+        # Pack the header together with the next few field blocks into the
+        # same Section as the thumbnail — a bare one-line title next to a
+        # full-height portrait leaves a large dead gap below it, so keep
+        # pulling in leading content until the section has enough text to
+        # roughly match the thumbnail's height (capped so long headers
+        # don't hoover up the whole tab).
+        # Discord caps a Section at 3 text children total.
+        section_parts = [p for p in (header_text,) if p]
+        section_chars = len(header_text or "")
+        while field_texts and section_chars < 220 and len(section_parts) < 3:
+            section_parts.append(field_texts.pop(0))
+            section_chars += len(section_parts[-1])
+            packed_field_count += 1
+        if section_parts:
+            children.append(
+                discord.ui.Section(
+                    *section_parts, accessory=discord.ui.Thumbnail(thumb_url)
+                )
+            )
+        else:
+            children.append(
+                discord.ui.Section("​", accessory=discord.ui.Thumbnail(thumb_url))
+            )
+    elif header_text:
+        children.append(discord.ui.TextDisplay(header_text))
+
+    # A small separator between each stacked field keeps a busy tab (10+
+    # stat blocks) reading as a sequence of distinct entries rather than one
+    # undifferentiated wall of text — Components V2 has no side-by-side
+    # column layout to fall back on, so this is the only lever available.
+    for idx, text in enumerate(field_texts):
+        if idx > 0 or packed_field_count > 0:
+            children.append(
+                discord.ui.Separator(spacing=discord.SeparatorSpacing.small)
+            )
+        children.append(discord.ui.TextDisplay(text))
+
+    if ran_out:
+        children.append(
+            discord.ui.TextDisplay(
+                "-# …additional content omitted (message length limit)"
+            )
+        )
+
+    if embed.image and embed.image.url:
+        children.append(
+            discord.ui.MediaGallery(discord.MediaGalleryItem(media=embed.image.url))
+        )
+
+    if embed.footer and embed.footer.text:
+        footer_text = _take(f"-# {embed.footer.text}")
+        if footer_text:
+            children.append(discord.ui.TextDisplay(footer_text))
+
+    if not children:
+        children.append(discord.ui.TextDisplay("​"))
+
+    return discord.ui.Container(*children, accent_color=embed.color)
+
+
+def create_combat_layout(
+    player: Player,
+    monster: Monster,
+    logs: Dict[str, str] = None,
+    title_override: str = None,
+    compact: bool = False,
+    player_avatar_url: str | None = None,
+) -> discord.ui.Container:
+    """Components V2 equivalent of create_combat_embed for the live in-fight
+    turn HUD. Gives the player an actual portrait (Section+Thumbnail) next
+    to their stats, which the classic embed had no room for since its one
+    image slot is used by the monster's art.
+    """
+    logs = logs or {}
+    is_uber = getattr(monster, "is_uber", False)
+
+    from vtuber.rpg.idleology.core.combat.calc.hit_calc import (
+        calculate_hit_chance,
+        calculate_monster_hit_chance,
+    )
+
+    p_hit = int(calculate_hit_chance(player, monster) * 100)
+    m_hit = int(calculate_monster_hit_chance(player, monster) * 100)
+
+    mod_text = ""
+    if monster.modifiers:
+        mod_text = "\n__Modifiers:__ " + ", ".join(
+            f"**{m}**" for m in monster.display_modifiers
+        )
+
+    p_atk = player.get_total_attack(monster)
+    p_def = player.get_total_defence()
+    p_crit = player.get_current_crit_chance()
+    p_pdr = player.get_total_pdr()
+    p_fdr = player.get_total_fdr()
+
+    description = f"A level **{monster.level}** {monster.name} approaches!{mod_text}"
+
+    prestige_name = format_prestige_name(
+        player.name, player.prestige_title, player.prestige_emblem
+    )
+
+    is_essence = getattr(monster, "is_essence", False)
+    if is_uber:
+        title = "UBER ENCOUNTER"
+        accent = discord.Color.gold()
+    elif is_essence:
+        title = title_override or f"Witness {prestige_name} (Level {player.level})"
+        accent = discord.Color.from_rgb(255, 255, 255)
+    else:
+        title = title_override or f"Witness {prestige_name} (Level {player.level})"
+        accent = discord.Color.green()
+
+    children: list = [discord.ui.TextDisplay(f"## {title}\n{description}")]
+
+    m_atk = monster.effective_attack
+
+    _mit_parts = []
+    if p_pdr > 0:
+        _mit_parts.append(f"{STAT_PDR} {p_pdr}%")
+    if p_fdr > 0:
+        _mit_parts.append(f"{STAT_FDR} {p_fdr}")
+    _mit_suffix = (" | " + " | ".join(_mit_parts)) if _mit_parts else ""
+
+    # One stat line per combatant instead of two — still fully readable
+    # pipe-separated, just without the extra line break. The 🧠 marker is
+    # only a placeholder icon for players with no equipped emblem —
+    # format_prestige_name already prepends the emblem itself, so showing
+    # both would double up.
+    player_icon = "" if player.prestige_emblem else "🧠 "
+    player_text = (
+        f"### {player_icon}{prestige_name}\n"
+        f"{get_hp_display(player.current_hp, player.total_max_hp, player.combat_ward)}\n"
+        f"{STAT_ATK} {p_atk:,} | {STAT_DEF} {p_def:,} | 🎯 ~{p_hit}% | 🗡️ {p_crit}%{_mit_suffix}"
+    )
+    monster_text = (
+        f"### {UBER_EMOJI} {monster.name}\n"
+        f"{get_hp_display(monster.hp, monster.max_hp, monster.ward)}\n"
+        f"{STAT_ATK} {m_atk:,} | {STAT_DEF} {monster.effective_defence:,} | 🎯 ~{m_hit}%"
+    )
+    # Round 0 is the opening encounter frame, before any turn has resolved —
+    # show the monster's full art once via a MediaGallery, sharing one
+    # Section with the player for their portrait+stats. From round 1 onward
+    # the turn log starts stacking up, so the monster's art collapses to a
+    # thumbnail (same treatment as the player) to leave room for battle text.
+    show_full_monster_image = monster.combat_round == 0 and bool(monster.image)
+
+    if show_full_monster_image:
+        combined_text = f"{player_text}\n\n{monster_text}"
+        if player_avatar_url:
+            children.append(
+                discord.ui.Section(
+                    combined_text,
+                    accessory=discord.ui.Thumbnail(
+                        player_avatar_url, description=player.name
+                    ),
+                )
+            )
+        else:
+            children.append(discord.ui.TextDisplay(combined_text))
+
+        children.append(
+            discord.ui.MediaGallery(
+                discord.MediaGalleryItem(media=monster.image, description=monster.name)
+            )
+        )
+    else:
+        if player_avatar_url:
+            children.append(
+                discord.ui.Section(
+                    player_text,
+                    accessory=discord.ui.Thumbnail(
+                        player_avatar_url, description=player.name
+                    ),
+                )
+            )
+        else:
+            children.append(discord.ui.TextDisplay(player_text))
+
+        if monster.image:
+            children.append(
+                discord.ui.Section(
+                    monster_text,
+                    accessory=discord.ui.Thumbnail(
+                        monster.image, description=monster.name
+                    ),
+                )
+            )
+        else:
+            children.append(discord.ui.TextDisplay(monster_text))
+
+    status_text = build_status_text(player, monster)
+    afflictions = build_afflictions_text(player, monster)
+    log_lines = []
+    for name, message in logs.items():
+        if message:
+            text = (
+                (getattr(message, "compact_log", None) or str(message))
+                if compact
+                else str(message)
+            )
+            log_lines.append(f"**{name}**\n{text}")
+            if (
+                hasattr(message, "partner_log")
+                and message.partner_log
+                and hasattr(message, "partner_name")
+                and message.partner_name
+            ):
+                log_lines.append(f"**{message.partner_name}**\n{message.partner_log}")
+
+    # Status + Afflictions share one component (both are persistent-effect
+    # readouts); the turn log gets its own since it's the part that changes
+    # every turn and reads best set apart.
+    status_block_lines = []
+    if status_text:
+        status_block_lines.append(f"**⚙️ Status**\n{status_text}")
+    if afflictions:
+        status_block_lines.append(f"**⚠️ Afflictions**\n{afflictions}")
+
+    if status_block_lines or log_lines:
+        children.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        if status_block_lines:
+            children.append(discord.ui.TextDisplay("\n\n".join(status_block_lines)))
+        if log_lines:
+            children.append(discord.ui.TextDisplay("\n\n".join(log_lines)))
+
+    return discord.ui.Container(*children, accent_color=accent)
+
+
+def create_combat_embed(
+    player: Player,
+    monster: Monster,
+    logs: Dict[str, str] = None,
+    title_override: str = None,
+    compact: bool = False,
+) -> discord.Embed:
+    logs = logs or {}
+    is_uber = getattr(monster, "is_uber", False)
+
+    from vtuber.rpg.idleology.core.combat.calc.hit_calc import (
+        calculate_hit_chance,
+        calculate_monster_hit_chance,
+    )
+
+    p_hit = int(calculate_hit_chance(player, monster) * 100)
+    m_hit = int(calculate_monster_hit_chance(player, monster) * 100)
+
+    mod_text = ""
+    if monster.modifiers:
+        mod_text = "\n__Modifiers:__ " + ", ".join(
+            f"**{m}**" for m in monster.display_modifiers
+        )
+
+    p_atk = player.get_total_attack(monster)
+    p_def = player.get_total_defence()
+    p_crit = player.get_current_crit_chance()
+    p_pdr = player.get_total_pdr()
+    p_fdr = player.get_total_fdr()
+
+    description = f"A level **{monster.level}** {monster.name} approaches!{mod_text}"
+
+    prestige_name = format_prestige_name(
+        player.name, player.prestige_title, player.prestige_emblem
+    )
+
+    # UBER OVERRIDES
+    is_essence = getattr(monster, "is_essence", False)
+    if is_uber:
+        title = "UBER ENCOUNTER"
+        color = 0xFFD700  # Gold
+    elif is_essence:
+        title = (
+            title_override
+            if title_override
+            else f"Witness {prestige_name} (Level {player.level})"
+        )
+        color = 0xFFFFFF  # White — Calcified monster
+    else:
+        title = (
+            title_override
+            if title_override
+            else f"Witness {prestige_name} (Level {player.level})"
+        )
+        color = 0x00FF00  # Green
+
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.set_image(url=monster.image)
+
+    m_atk = monster.effective_attack
+    embed.add_field(
+        name=f"{UBER_EMOJI} {monster.name}",
+        value=(
+            f"{monster.hp:,}/{monster.max_hp:,} {STAT_HP}\n"
+            f"{STAT_ATK} {m_atk:,} | {STAT_DEF} {monster.effective_defence:,}\n"
+            f"🎯 ~{m_hit}%"
+        ),
+        inline=True,
+    )
+    _mit_parts = []
+    if p_pdr > 0:
+        _mit_parts.append(f"{STAT_PDR} {p_pdr}%")
+    if p_fdr > 0:
+        _mit_parts.append(f"{STAT_FDR} {p_fdr}")
+    _mit_line = ("\n" + " | ".join(_mit_parts)) if _mit_parts else ""
+
+    player_icon = "" if player.prestige_emblem else "🧠 "
+    embed.add_field(
+        name=f"{player_icon}{prestige_name}",
+        value=(
+            f"{get_hp_display(player.current_hp, player.total_max_hp, player.combat_ward)}\n"
+            f"{STAT_ATK} {p_atk:,} | {STAT_DEF} {p_def:,}\n"
+            f"🎯 ~{p_hit}% | 🗡️ {p_crit}%"
+            f"{_mit_line}"
+        ),
+        inline=True,
+    )
+
+    status_text = build_status_text(player, monster)
+    if status_text:
+        embed.add_field(name="⚙️ Status", value=status_text, inline=False)
+
+    afflictions = build_afflictions_text(player, monster)
+    if afflictions:
+        embed.add_field(name="⚠️ Afflictions", value=afflictions, inline=False)
+
+    for name, message in logs.items():
+        if message:
+            # In compact mode use the condensed log (no flavor text); fall back to full log
+            if compact:
+                text = getattr(message, "compact_log", None) or str(message)
+            else:
+                text = str(message)
+            embed.add_field(name=name, value=text, inline=False)
+            # Partner per-turn effects are stored on PlayerTurnResult
+            if (
+                hasattr(message, "partner_log")
+                and message.partner_log
+                and hasattr(message, "partner_name")
+                and message.partner_name
+            ):
+                embed.add_field(
+                    name=message.partner_name,
+                    value=message.partner_log,
+                    inline=False,
+                )
+
+    return embed

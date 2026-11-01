@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import yaml
 from vtuber import VtuberAI
-from vtuber.discord_voice import DiscordVoiceService, VoiceTurnBuffer, to_asr_samples, to_discord_pcm
+from vtuber.discord.discord_voice import DiscordVoiceService, VoiceTurnBuffer, to_asr_samples, to_discord_pcm
 
 
 def voice_frame():
@@ -128,7 +128,7 @@ class AudioTests(unittest.TestCase):
             service.on_status = status
             tree = Mock()
             tree.command.return_value = lambda function: function
-            with patch.object(discord, 'Client', Client), patch('discord.app_commands.CommandTree', return_value=tree):
+            with patch('discord.ext.commands.Bot', Client), patch.object(service, 'register_commands', new=AsyncMock()):
                 await asyncio.wait_for(service._serve(), timeout=3)
             self.assertEqual(service.audio_jobs.get_nowait()[:2], (42, '觀眾'))
             self.assertFalse(channel.connect.call_args.kwargs['self_deaf'])
@@ -152,6 +152,7 @@ class PriorityTests(unittest.TestCase):
     def test_voice_waits_for_current_round_then_precedes_text_fifo(self):
         started, release = threading.Event(), threading.Event()
         replies, destinations = [], []
+        self.app.llm = Mock()
         self.app.generate_reply = lambda text, speaker, **kwargs: replies.append(text) or text
 
         def speak(text):

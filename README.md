@@ -1,3 +1,41 @@
+## YouTube 點歌台
+
+點歌功能依 `D:\Program\node\twitch` 的現有行為整合，原 Node 專案與原資料檔保留。新歌單與歷史紀錄透過 SQLAlchemy ORM 存在目前設定的 SQLite 資料庫中，不需要另外啟動 Node.js 或 AI。
+
+- Twitch：`!點歌 <YouTube連結>`，指令必須包含 `!` 前綴。需手動啟動 Twitch 服務。
+- Discord：`/music add url:連結` 點歌、`/music queue` 查看歌單。
+- Discord 白名單控制：`/music skip`、`/music pause`、`/music resume`、`/music volume value:0～100`、`/music remove request_id:編號`。
+- 點歌控制頁：`http://localhost:8765/songs`，也可從通知區「開啟點歌台」進入。
+- OBS 瀏覽器來源：`http://localhost:8765/songs?obs=1`，使用透明背景，播放器與歌單自動填滿瀏覽器來源的寬高，不顯示控制台。播放器高度隨來源尺寸調整，歌單填滿剩餘空間並可捲動。
+
+只接受 YouTube 影片連結，待播不重複，預設最多 100 首；可用 `music.max_queue` 調整。影片由 YouTube IFrame Player API 在網頁播放，不下載音訊，也不在 Discord 語音頻道播歌。播放流程沿用原 Node 專案：YouTube API 就緒後，頁面依待播順序直接載入影片並自動播放，不使用播放權租約或主從限制。若被瀏覽器阻擋則按「開始播放」。同時開啟多個播放頁會各自播放，請只讓一個頁面輸出到直播。
+
+播完與手動切歌都會移出待播並累計一次；無法播放或直接移除不計次。歷史每部影片只保留一份標題、最後點歌者、最後播放時間與累計次數，預設全部列出，按最後播放時間排序，可搜尋並重新加入待播。點歌與待播使用遞增數字編號。舊 Node 專案的 JSON 歷史不會自動搬動或覆寫。
+
+已加入原版 JS 前端流程、ORM 歌單與 FastAPI 相容介面的自動化測試。YouTube 錯誤 101／150 代表影片不允許嵌入，並非自動播放未啟動；畫面會顯示錯誤代碼。播放失敗依原版邏輯只在本次頁面跳過，不累計次數，原待播資料保留供重新整理後重試。
+
+## Live2D 網頁與 OBS
+
+本機網頁使用 FastAPI + Uvicorn，預設網址為 `http://localhost:8765/`。雙擊 `start.bat` 啟動後，可由通知區或控制介面選「開啟角色網頁」。角色由瀏覽器繪製，主程式不再建立 pygame／Live2D 桌面視窗，也不啟動攝影機。按住滑鼠左鍵拖曳角色畫面可移動模型，也支援觸控拖曳；滾輪縮放會保留移動後的位置。
+
+OBS 新增「瀏覽器」來源，網址填 `http://localhost:8765/?obs=1`，尺寸可設 800 × 900。OBS 模式背景透明、隱藏控制面板，收到生成語音後自動播放，嘴型由音訊音量驅動。一般瀏覽器先按一次「啟用聲音」。在角色畫面上使用滑鼠滾輪可縮放模型（向上放大、向下縮小，範圍為原始顯示比例的 0.3～4 倍）；OBS 請先開啟來源的「互動」視窗再操作滾輪。
+
+OBS 勾選「透過 OBS 控制音訊」，即可在混音器控制音量；需要自己聽見時，再於進階音訊設定選擇監聽。為避免切換場景時中斷，關閉「來源不可見時關閉」與「場景啟用時重新整理」。同一角色頁開在多個有聲來源時，會各自播放；請只讓一個來源輸出到直播。
+
+所有生成語音都會送到網頁，包含 Discord 語音回覆；Discord 的語音輸出仍保留。`output.auto_play`、`discord.local_playback` 舊值保留，但不再控制本機音效裝置播放，網頁與 OBS 各自控制聲音。關閉角色頁不會關閉 Discord；頁面重新連線後不重播載入前的舊語音。
+
+`live2d.web.port` 可在 YAML 設定連接埠（預設 8765）。服務只監聽本機 `localhost`，只提供角色素材、前端與播放資料，不提供設定檔或憑證。前端繪圖執行檔已放在 `vtuber/GUI/web/vendor/`，正常啟動不依賴外部 CDN。FastAPI 服務啟動不載入任何 AI 模型。
+
+## 啟動與功能分類
+
+雙擊 `start.bat` 啟動 Discord 常駐服務及通知區圖示；啟動時不載入文字、ASR 或 TTS 模型，也不連接 Twitch。電腦必須保持開機、連網，主程式須維持執行。
+
+右鍵通知區的白璃圖示，選擇「開啟控制介面」。分別按 Twitch、textAI、voiceAI 的「啟動／停止／重啟」；啟動 Twitch 不會連動載入 AI。textAI 載入文字模型；voiceAI 載入語音合成與語音辨識模型。文字互動需要 textAI，語音互動需要 textAI 與 voiceAI。停止 voiceAI 會釋放 ASR 與 TTS 程序。
+
+關閉或最小化介面會隱藏到通知區。GUI 程序意外結束時，Discord 保持執行並重新建立 GUI；只有「結束程式（含 Discord）」才關閉主服務。
+
+六個功能資料夾位於 `vtuber/`：`discord/`、`twitch/`、`textAI/`、`voiceAI/`、`GUI/`、`disable/`。所有資料庫模型、連線、對話保存及觀眾記憶統一放在根目錄 `database/`，使用 SQLAlchemy ORM 管理現有 SQLite；共用設定與程序通訊放在 `core/`、`runtime/`。攝影機眼睛追蹤與中指辨識已停用，原始碼保存在 `disable/`，舊設定不會重新啟用它們。
+
 # AI VTuber 白璃
 
 Windows 本機 Live2D、GGUF 對話、SenseVoice 語音辨識、Index-TTS 2.5 語音生成。
@@ -14,7 +52,7 @@ IndexTTS 上游的 NumPy/OpenCV 版本限制以本專案相容版本取代；
 不要在 index-tts 執行 uv sync。
 llama-cpp-python 0.3.36 使用官方 CUDA 13.0 wheel，並安裝獨立 CUDA 13 執行庫；
 PyTorch 保持 CUDA 12.8，兩套原生執行庫使用不同 DLL 名稱。
-`vtuberAI.py` 以 Discord 機器人為主服務：主程序持有 Discord 連線與指令，啟動桌面子程序（控制介面、Live2D、攝影機、ASR、資料庫及排程），桌面子程序再管理 Twitch、文字生成（LLM）與語音生成（Index-TTS）子程序。程序間使用私有 pipe 通訊，不開放網路服務。
+`vtuberAI.py` 以 Discord 機器人為主服務：主程序持有 Discord 連線與指令，啟動桌面子程序（通知區、控制介面、FastAPI 角色網頁、資料庫及排程），桌面子程序再管理 Twitch、文字生成（LLM）與語音生成（Index-TTS）子程序。程序間使用私有 pipe 通訊；角色網頁僅監聽本機。
 控制視窗可分別停止、啟動或重啟 Twitch、文字生成與語音生成；停止後儲存程式修改，再按啟動即可重新載入。重啟這些模組不會重新登入 Discord。修改 Discord 主服務、桌面介面、ASR 或排程則需整體重啟。
 停止會取消該子程序尚未完成的請求；已保存的對話保留，不自動重播或重送失敗請求。停止 Twitch 不影響 Discord 連線。AI 尚未載入完成時收到的 Discord 語音不會排入回覆；關閉桌面視窗會結束整個服務。
 攝影機改用 OpenCV DirectShow，不再啟動 FFmpeg process。
@@ -22,20 +60,19 @@ PyTorch 保持 CUDA 12.8，兩套原生執行庫使用不同 DLL 名稱。
 ### 啟動與頻道控制
 
 雙擊 `start.bat`，或在專案目錄執行 `.\.venv\Scripts\python.exe -X utf8 .\vtuberAI.py`。
-控制視窗的「頻道設定」可更新 Discord 語音頻道 ID 與 Twitch 頻道名稱。Discord 頻道僅用於本次執行，不存入設定；Twitch 頻道會寫回本機 `setting.yml`。Discord 頻道必須屬於設定中的 `guild_id`，且為普通語音頻道；切換時會中斷正在播放的 Discord 音訊。Twitch 更新後只重啟 Twitch 子程序，`enabled` 開關保持原設定。
+控制視窗的「頻道設定」可更新 Discord 語音頻道 ID 與 Twitch 頻道名稱。Discord 頻道僅用於本次執行，不存入設定；Twitch 頻道會寫回本機 `setting.yml`。Discord 頻道必須屬於設定中的 `guild_id`，且為普通語音頻道；切換時會中斷正在播放的 Discord 音訊。Twitch 已啟動時，更新頻道會重啟 Twitch；未啟動時只儲存頻道，不會啟動服務。
 
-Discord 指令白名單預設為空，沒有任何人可使用切換指令。先在本機以指令加入使用者 ID，再啟動服務：
+Discord 指令白名單預設為空。啟動服務後，由設定伺服器的擁有者使用 Discord 斜線指令設定：
 
-```powershell
-cd D:\AI\ai-vtuber
-.\.venv\Scripts\python.exe -X utf8 .\vtuberAI.py --allow-discord-user 你的Discord使用者ID
-.\.venv\Scripts\python.exe -X utf8 .\vtuberAI.py
-```
+- `/discord-users add member:成員`：加入白名單。
+- `/discord-users remove member:成員`：移除白名單。
+- `/discord-users list`：查看白名單。
+- `/discord-users clear`：清空白名單。
 
-`--allow-discord-user` 可重複指定多個 ID，設定儲存後程式會離開。`--clear-discord-users` 可清空白名單；修改名單後需重啟主服務。請替換上述 ID 佔位文字為數字。
+變更會儲存到 `setting.yml` 並立即生效，不需重啟。只有伺服器擁有者可管理白名單；白名單為空時也能設定。主啟動入口不再提供命令列設定參數。安裝、診斷與測試腳本的本機維護參數保留。
 
-儲存 `setting.yml` 後，可按控制視窗的「重新載入設定」，或由白名單使用者執行 `/reload`。程式先檢查設定格式，再重啟桌面與所有功能子程序、重新建立 Discord 連線，讓模型、ASR、Live2D、Twitch、歡迎訊息、文字回覆與白名單等設定套用。進行中的工作會中斷，模型需要重新載入。伺服器未改變時會保留本次語音目標並重新連線。
-重新載入固定保留目前使用的 `bot_token`，不會將它寫回或覆蓋設定檔內修改的 token；若要改用新 token，請結束整個程式後重新啟動。訊息「子程序正在重新載入模型」只表示已開始重新啟動，不代表模型已載入完成。
+儲存 `setting.yml` 後，可按控制視窗的「重新載入設定」，或由白名單使用者執行 `/reload`。程式先檢查設定格式，再重啟桌面、重新建立 Discord 連線，讓設定套用。進行中的工作會中斷，Twitch／textAI／voiceAI 回到停止狀態，需按需重新啟動。伺服器未改變時會保留本次語音目標並重新連線。
+重新載入固定保留目前使用的 `bot_token`，不會將它寫回或覆蓋設定檔內修改的 token；若要改用新 token，請結束整個程式後重新啟動。重新載入不會自動載入 AI 模型。
 白名單使用者可先加入普通語音頻道，再於已設定的 Discord 伺服器使用 `/join`，機器人會加入該使用者所在的頻道，不需提供參數。非白名單使用者、其他伺服器與私訊皆無切換權限。機器人邀請需包含 `applications.commands` scope，並具備目標頻道的檢視頻道、連線及說話權限。
 
 ### Discord 基本伺服器指令
@@ -51,12 +88,14 @@ cd D:\AI\ai-vtuber
 | `/choose options` | 隨機抽一個選項，例如 `咖啡｜茶｜果汁` | 已設定伺服器的成員 |
 | `/poll question options [hours] [multiple]` | Discord 原生投票，選項用 `｜` 分隔，預設 24 小時、單選 | 成員與機器人皆需建立投票權限 |
 | `/avatar [member]` | 查看自己或指定成員的頭像 | 已設定伺服器的成員 |
-| `/join` | 加入下指令者所在的語音頻道，開啟自動加入 | 本機 ID 白名單 |
-| `/leave` | 離開語音、清除未辨識音訊並關閉自動加入 | 本機 ID 白名單 |
-| `/reload` | 重新讀取設定，保留目前登入的 bot_token | 本機 ID 白名單 |
+| `/join` | 加入下指令者所在的語音頻道，開啟自動加入 | Discord ID 白名單 |
+| `/leave` | 離開語音、清除未辨識音訊並關閉自動加入 | Discord ID 白名單 |
+| `/reload` | 重新讀取設定，保留目前登入的 bot_token | Discord ID 白名單 |
 
 `/roll`、`/choose` 的結果與 `/poll` 投票公開顯示在下指令的頻道，其餘指令及錯誤回覆只對使用者本人顯示。擲骰限制 1～20 顆、每顆 2～1000 面；抽籤限制 2～20 個不同選項；投票限制 2～10 個不同選項、1～168 小時，`multiple: true` 可複選。投票由 Discord 保存，機器人重啟後仍可使用。
 `/leave` 會將 `discord.auto_join: false` 寫回設定，重開程式也不會自動進入語音；`/join` 或介面更新 Discord 頻道時會重新開啟。此設定不影響機器人登入或一般指令。`/status` 顯示 Discord 服務狀態，不代表 AI 模型已完成載入。
+指令依 discord.py 的 `commands.Bot` 與 `commands.Cog` 建立，使用 `app_commands.command` 宣告斜線指令。`GeneralCommands` 管理查詢、`VoiceCommands` 管理語音與重新載入、`FunCommands` 管理互動、`AccessCommands` 管理白名單。由 `Bot.add_cog()` 註冊到同一個 `Bot.tree`，不額外建立 CommandTree。
+
 更新指令程式後需重啟整個服務，登入後會註冊全域指令，再清除設定伺服器內舊的限定指令以避免重複顯示；完成後重新連線不會重複同步。全域註冊不改變既有權限：仍只允許在設定的伺服器執行，語音控制仍需 ID 白名單。
 
 ### 新成員歡迎訊息
@@ -128,13 +167,13 @@ Live2D 表情標記與情感向量各自運作，原有 LLM、ASR、Live2D 設�
 模型載入與推論不提供強制逾時中止，舊 tts.startup_timeout、tts.inference_timeout 設定已移除。
 
 setting.yml 保留原本的 live2d、llm、chat、asr 與 output 設定。
-攝影機裝置可在 live2d.camera_tracking.device 修改；關閉追蹤設 enabled: false。
+攝影機追蹤已移至 `vtuber/disable/`，不在主程式中啟動。
 
-攝影機擷取格式可設定 camera_tracking.width、height、pixel_format、fps，預設 YUY2 640×360 / 30 FPS。
+舊攝影機設定保留作封存參考，主程式不使用。
 # Twitch 聊天輸入
 
 主程式讀取根目錄的本機 `setting.yml`。
-`vtuber/twitch_chat.py` 統一管理 Twitch 服務的啟動、停止、專案回呼、雙帳號 OAuth、EventSub 收訊、指令與關鍵字回覆。由原本 Twitch 服務啟動，不需要 Node.js 或 `.env`，不再使用 IRC 或 `mode` 設定。
+`vtuber/twitch/twitch_chat.py` 統一管理 Twitch 服務的啟動、停止、專案回呼、雙帳號 OAuth、EventSub 收訊、指令與關鍵字回覆。由原本 Twitch 服務啟動，不需要 Node.js 或 `.env`，不再使用 IRC 或 `mode` 設定。
 
 在本機 `setting.yml` 的 `twitch` 分類填入 `enabled: true`、`channel`、`client_id`、`client_secret`、`redirect_uri: http://localhost:3000/callback`。Twitch Developer Console 必須登記相同回呼網址。也可透過環境變數 `TWITCH_CLIENT_ID`、`TWITCH_CLIENT_SECRET` 提供憑證。請勿將密鑰放入公開範本。
 
@@ -142,7 +181,7 @@ setting.yml 保留原本的 live2d、llm、chat、asr 與 output 設定。
 
 `data/commands.json` 每則訊息重新讀取，支援 `commands` 的 `response`、`role`（`everyone`、`moderator`、`broadcaster`）與 `keywords`。`prefix` 預設 `!`；回覆支援 `{user}`、`{args}`，以 Bot 帳號引用原訊息送出。`tokens_file`、`commands_file` 可指定相對專案根目錄的路徑。忽略 Bot 自己與 `ignored_users` 的訊息，通知重送會去重。
 
-啟動原本的 `start.bat` 即可。模型載入完成後自動連線，閒置時接受一則聊天室訊息，觀眾名稱與訊息會進入主程式文字對話流程，並保留於原本的對話紀錄。從接受訊息到回覆生成、語音合成及播放完成期間，新聊天室訊息只存檔、不回覆、不排隊、不補讀；手動輸入或錄音處理中也採相同方式。完成後接受下一則新訊息。略過 `twitch.ignored_users` 名單，斷線按 `reconnect_seconds` 自動重連。
+啟動 `start.bat` 後，從通知區開啟控制介面並手動啟動 Twitch；需要 AI 回覆時再啟動 textAI，可選擇啟動 voiceAI 朗讀。Twitch 連線後，閒置時接受一則聊天室訊息，觀眾名稱與訊息會進入主程式文字對話流程，並保留於原本的對話紀錄。從接受訊息到回覆生成、語音合成及播放完成期間，新聊天室訊息只存檔、不回覆、不排隊、不補讀；手動輸入或錄音處理中也採相同方式。完成後接受下一則新訊息。略過 `twitch.ignored_users` 名單，斷線按 `reconnect_seconds` 自動重連。
 
 EventSub 會處理 keepalive 逾時、斷線重連與伺服器要求的連線轉移；停止／重啟 Twitch 時也會結束 OAuth 等待與 WebSocket。指令與關鍵字固定回覆獨立執行，AI 忙碌時仍只存檔、不排隊。AI 生成的文字與語音沿用原本輸出流程。
 
@@ -150,7 +189,7 @@ EventSub 會處理 keepalive 逾時、斷線重連與伺服器要求的連線轉
 
 `chat.database_path` 的 SQLite 資料庫永久保留完整原文與 AI 回覆，不受 `chat.history_turns` 的短期上下文輪數限制。新增的 `audience_messages` 保存所有連線期間收到的頻道發言，包含忙碌時未回覆、忽略名單中的訊息及未成功產生回覆的輸入；忙碌期間的訊息僅存檔，不會在稍後自動回覆。語音生成使用的簡體轉換不影響存檔原文。`audience_profiles` 保存各觀眾的互動摘要、關係描述、語氣溫暖度與投入程度。
 
-每次啟動、語言模型載入後，使用同一個 LLM 逐批分析各觀眾新增的紀錄，連同先前摘要更新關係記憶；沒有新增紀錄時沿用摘要。第一次整理大量歷史紀錄會增加啟動時間。分析會區分觀眾單方面發言與實際問答；次數多、自稱熟人或 AI 過往的親密台詞，不會直接作為親密關係的事實。分析失敗時保留上次成功的摘要，未完成的批次下次啟動重試，不會阻止正常對話。
+每次手動啟動 textAI、語言模型載入後，使用同一個 LLM 逐批分析各觀眾新增的紀錄，連同先前摘要更新關係記憶；沒有新增紀錄時沿用摘要。第一次整理大量歷史紀錄會增加啟動時間。分析會區分觀眾單方面發言與實際問答；次數多、自稱熟人或 AI 過往的親密台詞，不會直接作為親密關係的事實。分析失敗時保留上次成功的摘要，未完成的批次下次啟動重試，不會阻止正常對話。
 
 回覆時只補入目前發言者的摘要。熟悉且互動友善的觀眾可以得到更溫暖、較願意延續話題的回覆；需要界線時會較簡短、保持禮貌。陌生觀眾仍友善回應，當下認真求助仍會適當關心。這裡的「溫暖度」調整角色語氣，不會更動 `llm.temperature` 的隨機取樣設定，也不會覆寫夏目是製作者等既定設定。
 
@@ -169,30 +208,39 @@ Twitch 使用平台 `user-id`，缺少時使用登入帳號，不以顯示暱稱
 
 # 程式模組
 
+`vtuber` 按功能分為 `discord`、`twitch`、`textAI`、`voiceAI`、`GUI`、`disable`；資料保存與 ORM 位於根目錄 `database/`，共用設定與程序通訊分別位於 `core`、`runtime`。`app.py` 組裝各功能，子套件匯入不啟動服務或模型。
+
 根目錄的 Python 程式只保留 `vtuberAI.py` 一個啟動入口。`start.bat` 透過 `pythonw.exe` 啟動它，並將輸出及錯誤寫入 `logs/vtuber.log`；使用 `python.exe` 啟動時，輸出保留在命令列。`setup.bat`、設定檔及說明文件維持原本用途。既有的 `from vtuberAI import VtuberAI` 仍可使用；其他程式建議改由 `from vtuber import VtuberAI` 匯入。
 
 | 模組 | 負責功能 |
 | --- | --- |
 | `vtuber/app.py` | `VtuberAI` 組裝、共用狀態、模型載入與關閉 |
-| `vtuber/config.py` | 設定讀取與以專案根目錄為準的路徑解析 |
-| `vtuber/storage.py` | 對話工作階段、歷史讀取及 SQLite 存檔 |
-| `vtuber/conversation.py` | LLM 回覆、Twitch 訊息接入與忙碌控制 |
-| `vtuber/speech.py` | 語音辨識、文字前處理、合成及播放 |
-| `vtuber/controls.py` | 控制視窗、按鈕及跨執行緒介面事件 |
-| `vtuber/avatar.py` | Live2D 繪製、表情分層與嘴型 |
-| `vtuber/tracking.py` | 攝影機、視線、頭部與手勢追蹤 |
-| `vtuber/audience_memory.py` | 觀眾發言封存及人際關係摘要 |
-| `vtuber/emotion_middleware.py` | 語音情緒分析 |
-| `vtuber/index_tts_client.py` | IndexTTS 介接及語音輸入繁簡轉換 |
-| `vtuber/twitch_chat.py` | Twitch 生命週期、OAuth、EventSub、指令與關鍵字回覆 |
-| `vtuber/discord_voice.py` | Discord 雙向語音、分段辨識、音訊轉換與播放 |
-| `vtuber/hand_gestures.py` | 手部關節與手勢判定 |
-| `vtuber/virtual_camera.py` | DirectShow 攝影機擷取 |
-| `vtuber/runtime_support.py` | Windows CUDA 動態函式庫路徑準備 |
+| `vtuber/core/config.py` | 設定讀取與以專案根目錄為準的路徑解析 |
+| `database/storage.py` | 對話工作階段、歷史讀取及 SQLite 存檔 |
+| `vtuber/textAI/conversation.py` | LLM 回覆、Twitch 訊息接入與忙碌控制 |
+| `vtuber/voiceAI/speech.py` | 語音辨識、文字前處理、合成及播放 |
+| `vtuber/GUI/controls.py` | 控制視窗、按鈕及跨執行緒介面事件 |
+| `vtuber/GUI/avatar.py` | 共用角色狀態、控制介面及網頁生命週期 |
+| `vtuber/GUI/web_avatar.py` | FastAPI 本機服務、模型素材、語音與播放確認 |
+| `vtuber/GUI/web/` | 瀏覽器 Live2D 繪製、音訊播放及嘴型 |
+| `vtuber/disable/tracking.py` | 攝影機、視線、頭部與手勢追蹤 |
+| `database/audience_memory.py` | 觀眾發言封存及人際關係摘要 |
+| `vtuber/voiceAI/emotion_middleware.py` | 語音情緒分析 |
+| `vtuber/voiceAI/index_tts_client.py` | IndexTTS 介接及語音輸入繁簡轉換 |
+| `vtuber/twitch/twitch_chat.py` | Twitch 生命週期、OAuth、EventSub、指令與關鍵字回覆 |
+| `vtuber/discord/discord_voice.py` | Discord 雙向語音、分段辨識、音訊轉換與播放 |
+| `vtuber/disable/hand_gestures.py` | 手部關節與手勢判定 |
+| `vtuber/disable/virtual_camera.py` | DirectShow 攝影機擷取 |
+| `vtuber/runtime/runtime_support.py` | Windows CUDA 動態函式庫路徑準備 |
+| `vtuber/core/paths.py` | 統一專案根目錄 |
+| `vtuber/runtime/ipc.py` | 私有 pipe 雙向 RPC |
+| `vtuber/runtime/process_runtime.py` | 功能子程序啟停與模型代理 |
+| `vtuber/discord/discord_host.py` | Discord 主服務與桌面子程序生命週期 |
 
-主程式由各功能的 mixin 組成，介面與 Live2D 在主執行緒更新。對話回覆依序處理；社群子程序透過 IPC 將收音送到主程序的 ASR，並將文字訊息交給既有排程。LLM（含名字校正、人際記憶與情緒分析）由文字生成子程序持有，Index-TTS 由語音生成子程序持有。匯入套件不會啟動攝影機、開視窗或載入模型；子程序啟動時才載入對應模型。
+主程式由各功能的 mixin 組成，控制介面在主執行緒更新，Live2D 由瀏覽器繪製。對話回覆依序處理；Discord 透過 IPC 將收音送到 voiceAI 程序的 ASR，並將文字訊息交給既有排程。LLM（含名字校正、人際記憶與情緒分析）由文字生成子程序持有，Index-TTS 由語音生成子程序持有。匯入套件不會啟動攝影機、開視窗或載入模型；子程序啟動時才載入對應模型。
 
 不使用硬體的功能測試：`.venv/Scripts/python.exe -X utf8 scripts/test_modular_app.py`。
+完整離線測試：`.venv/Scripts/python.exe -X utf8 -m unittest discover -s scripts -p "test_*.py"`，包含套件匯入、根目錄解析與子程序啟停檢查；不執行實際模型整合腳本。
 語音情緒與繁簡轉換測試：`.venv/Scripts/python.exe -X utf8 scripts/test_emotion_middleware.py`。
 實際模型整合檢查：`.venv/Scripts/python.exe -X utf8 scripts/check_integration.py`（會載入本機模型並產生測試音檔，不播放音訊）。
 
@@ -204,12 +252,12 @@ Discord 是固定啟用的主服務，不再使用 `discord.enabled`。在本機
 
 使用 /join 或介面加入語音頻道後，依 Discord 使用者 ID 分開收音，忽略其他 Bot 的音訊。成員停頓後，使用既有 SenseVoice 模型辨識成繁體中文，存入原本的觀眾資料庫，再進入優先佇列。語音訊息可在忙碌時排隊，待當輪「回覆生成、語音生成與播放」完成後，先依收到的辨識結果順序處理語音，再處理一般文字；不會中斷當輪。Twitch 訊息仍維持忙碌時只存檔、不安排回覆。Discord、Twitch、手動輸入使用不同的身分鍵，不會只憑相同暱稱合併為同一人。
 
-Discord 語音回覆使用現有角色與人際記憶、情緒分析、IndexTTS 和繁簡轉換。產生的音訊會在記憶體轉為 Discord 所需的 48 kHz 雙聲道 PCM，再由 Opus 傳送；不另啟動 FFmpeg。Live2D 嘴型會隨 Discord 的音訊播放更新。Discord 回覆預設不在本機喇叭重播；`local_playback: true` 可額外在本機播放（在 Discord 播放完成後）。本機與 Twitch 回覆仍播放到原本的音訊輸出。即使關閉麥克風的 `asr.enabled`，啟用 Discord 後仍會載入同一份 ASR 模型供 Discord 使用。
+Discord 語音回覆使用現有角色與人際記憶、情緒分析、IndexTTS 和繁簡轉換。產生的音訊會在記憶體轉為 Discord 所需的 48 kHz 雙聲道 PCM，再由 Opus 傳送；不另啟動 FFmpeg。Live2D 嘴型會隨 Discord 的音訊播放更新。Discord、本機與 Twitch 的生成語音統一送到網頁；網頁／OBS 播放時同步嘴型，不再直接播放到本機音效裝置。`asr.enabled` 控制本機麥克風按鈕；Discord 語音辨識同樣需要手動啟動 voiceAI，啟動 Discord 本身不載入 ASR。
 
 `discord` 分類的參數：
 
 - `enabled`、`bot_token`、`guild_id`：功能開關與 Bot 連線設定。
-- `local_playback`：是否額外在本機播放 Discord 回覆，預設 false。
+- `local_playback`：舊設定保留；現在由網頁／OBS 自行控制本機播放。
 - `speech_threshold`：判定說話的音量門檻。
 - `silence_seconds`：停頓多久後送去辨識。
 - `min_speech_seconds`：略過比此值短的聲音片段。
@@ -222,3 +270,13 @@ Discord 語音回覆使用現有角色與人際記憶、情緒分析、IndexTTS 
 收音依賴 discord.py 2.7.1、davey 0.1.7，以及鎖定 commit 的 DAVE 接收修正版（上游尚未合併的 [PR #65](https://github.com/imayhaveborkedit/discord-ext-voice-recv/pull/65)，commit `4da8413355893ed93798be9b4f3a07bc083875f6`）。一般已發布版本的接收套件不包含本專案驗證的修正，請由 requirements.txt 安裝。依賴已加入安裝器；真實頻道的收音、權限與重連仍需填入自己的 Bot 設定後驗證。
 
 離線測試：`.venv/Scripts/python.exe -X utf8 scripts/test_discord_voice.py`，驗證音訊格式、Opus 編解碼、分人停頓分段、轉錄入列、語音優先及模型鎖。
+
+## Twitch／Discord 共用 RPG
+
+`vtuber/rpg` 已接入 Idleology，隨既有 Discord 主服務啟動，使用 `data/rpg.sqlite3` 共用存檔。
+Discord 使用 `/rpg help`、`/rpg register`、`/rpg profile`、`/rpg combat`；
+原生 `/combat`、`/inventory`、`/gather`、`/settlement` 等互動玩法也已載入。
+Twitch 使用 `!rpg help`、`!rpg profile`、`!rpg inventory`、`!rpg combat`。
+要兩邊共用角色，先在 Discord 建角、用 `/rpg link` 私密取得驗證碼，再由 Twitch 輸入。
+尚未綁定的 Twitch 帳號請先綁定再建角，避免建立獨立角色。
+設定、完整指令與存檔說明見 [RPG 套件文件](vtuber/rpg/README.md)。

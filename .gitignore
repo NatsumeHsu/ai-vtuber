@@ -185,3 +185,6 @@ TEMP-env-backup-*/
 # Twitch OAuth credentials
 /data/tokens.json
 /data/tokens.tmp
+
+# Browser verification artifacts
+.playwright-cli/

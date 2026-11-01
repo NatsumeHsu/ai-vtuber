@@ -1,0 +1,191 @@
+import discord
+from discord import ButtonStyle, Interaction, ui
+
+from vtuber.rpg.idleology.core.base_view import BaseView
+from vtuber.rpg.idleology.core.combat import ui as combat_ui
+from vtuber.rpg.idleology.core.combat.mobgen.gen_mob import generate_uber_evelynn
+from vtuber.rpg.idleology.core.combat.turns import engine
+from vtuber.rpg.idleology.core.combat.views.views import CombatView
+from vtuber.rpg.idleology.core.combat.views.views_uber_hub import UberHubView, UberReturnView
+from vtuber.rpg.idleology.core.emojis import (
+    CORRUPTED_PROTECTION,
+    CORRUPTION_ENGRAM,
+    CORRUPTION_SIGIL,
+    ORIGIN_CORRUPTION,
+)
+from vtuber.rpg.idleology.core.images import CORRUPTION_GATE
+from vtuber.rpg.idleology.core.models import Monster
+
+
+class UberEvelynnLobbyView(BaseView):
+    def __init__(
+        self,
+        bot,
+        user_id: str,
+        server_id: str,
+        player,
+        uber_data: dict,
+        readiness_text: str,
+    ):
+        super().__init__(bot, user_id, server_id)
+        self.bot = bot
+        self.user_id = user_id
+        self.server_id = server_id
+        self.player = player
+        self.uber_data = uber_data
+        self.readiness_text = readiness_text
+        self.sigils = uber_data["corruption_sigils"]
+        self.message = None
+        self._processing = False
+        self._build_buttons()
+
+    def _build_buttons(self):
+        self.clear_items()
+
+        btn_start = ui.Button(
+            label="Challenge Evelynn",
+            style=ButtonStyle.danger if self.sigils >= 3 else ButtonStyle.secondary,
+            disabled=(self.sigils < 3),
+            emoji="⚔️",
+            row=0,
+        )
+        btn_start.callback = self.start_uber
+        self.add_item(btn_start)
+
+        btn_back = ui.Button(label="← Back", style=ButtonStyle.secondary, row=1)
+        btn_back.callback = self.go_back
+        self.add_item(btn_back)
+
+        btn_close = ui.Button(
+            label="Close", style=ButtonStyle.secondary, emoji="✖️", row=1
+        )
+        btn_close.callback = self.close_view
+        self.add_item(btn_close)
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="☠️ The Primordial Corruptor", color=discord.Color.dark_purple()
+        )
+        embed.set_thumbnail(url=CORRUPTION_GATE)
+
+        desc = (
+            "The air itself rots as you approach. A voice without sound fills your mind:\n"
+            '*"I was here before the first sin. I will remain after the last breath."*\n\n'
+            f"**Entry Cost:** 3 {CORRUPTION_SIGIL} Sigils of Corruption\n"
+            f"**Owned:** {self.sigils}\n\n"
+            f"**Assessment:** {self.readiness_text}\n\n"
+            f"{CORRUPTED_PROTECTION} **Corrupted Protection** — globally reduces all incoming damage by 60%.\n"
+            f"{ORIGIN_CORRUPTION} **Origin of Corruption** — every 3 turns, drains 10% of your ward and heals Evelynn for 10× that amount.\n"
+            "☠️ **All Corrupted Modifiers** — carries every common and rare modifier at max tier."
+        )
+        embed.description = desc
+
+        bp_status = (
+            "✅ Unlocked"
+            if self.uber_data.get("corruption_blueprint_unlocked", 0)
+            else "🔒 Locked"
+        )
+        embed.add_field(
+            name=f"{CORRUPTION_ENGRAM} Corruption Engrams",
+            value=str(self.uber_data.get("corruption_engrams", 0)),
+            inline=True,
+        )
+        embed.add_field(
+            name="Shrine of Corruption Blueprint", value=bp_status, inline=True
+        )
+
+        return embed
+
+    async def close_view(self, interaction: Interaction):
+        await interaction.response.defer()
+        self.bot.state_manager.clear_active(self.user_id)
+        await interaction.delete_original_response()
+        self.stop()
+
+    async def go_back(self, interaction: Interaction):
+        await interaction.response.defer()
+        uber_data = await self.bot.database.uber.get_uber_progress(
+            self.user_id, self.server_id
+        )
+        hub = UberHubView(
+            self.bot, self.user_id, self.server_id, self.player, uber_data
+        )
+        await combat_ui.handoff_to_layout(interaction.message, hub)
+        self.stop()
+
+    async def start_uber(self, interaction: Interaction):
+        if self._processing:
+            await interaction.response.defer()
+            return
+        self._processing = True
+
+        current_data = await self.bot.database.uber.get_uber_progress(
+            self.user_id, self.server_id
+        )
+        if current_data["corruption_sigils"] < 3:
+            self._processing = False
+            return await interaction.response.send_message(
+                "You do not have enough Sigils of Corruption.", ephemeral=True
+            )
+
+        await interaction.response.defer()
+
+        user_row = await self.bot.database.users.get(self.user_id, self.server_id)
+
+        # Uber lobbies reuse the same Player object across the hub<->lobby<->
+        # combat loop rather than reloading fresh from DB, so leftover stacks/
+        # buffs from a previous Uber fight (or a different boss entirely) must
+        # be explicitly cleared before generating the new encounter.
+        self.player.reset_combat_state()
+
+        monster = Monster(
+            name="",
+            level=0,
+            hp=0,
+            max_hp=0,
+            xp=0,
+            attack=0,
+            defence=0,
+            modifiers=[],
+            image="",
+            flavor="",
+        )
+        monster = generate_uber_evelynn(self.player, monster)
+        self.player.combat_ward = self.player.get_combat_ward_value()
+        engine.apply_stat_effects(self.player, monster)
+        start_logs = engine.apply_combat_start_passives(self.player, monster)
+        monster.is_uber = True
+        return_view = UberReturnView(
+            self.bot, self.user_id, self.server_id, self.player
+        )
+        view = CombatView(
+            self.bot,
+            self.user_id,
+            self.server_id,
+            self.player,
+            monster,
+            start_logs,
+            combat_phases=None,
+            post_combat_view=return_view,
+            title_override="☠️ UBER ENCOUNTER",
+            player_avatar_url=user_row["appearance"],
+        )
+
+        await self.bot.database.uber.increment_corruption_sigils(
+            self.user_id, self.server_id, -3
+        )
+        self.bot.state_manager.set_active(self.user_id, "uber_boss")
+        try:
+            await interaction.edit_original_response(embed=None, view=view)
+            view.message = await interaction.original_response()
+        except Exception:
+            await self.bot.database.uber.increment_corruption_sigils(
+                self.user_id, self.server_id, 3
+            )
+            self.bot.state_manager.clear_active(self.user_id)
+            await interaction.followup.send(
+                "Something went wrong starting the encounter. Your sigils have been refunded.",
+                ephemeral=True,
+            )
+            return
+        self.stop()

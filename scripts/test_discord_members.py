@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import discord
-from vtuber.discord_members import MemberServices
+from vtuber.discord.discord_members import MemberServices
 
 
 class MemberTests(unittest.IsolatedAsyncioTestCase):

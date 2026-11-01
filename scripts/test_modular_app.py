@@ -30,7 +30,8 @@ class ModularAppTests(unittest.TestCase):
 
     def test_legacy_entry_starts_same_application(self):
         self.assertIs(vtuberAI.VtuberAI, VtuberAI)
-        with patch('vtuber.discord_host.DiscordHost.run') as run:
+        with patch('vtuber.discord.discord_host.DiscordHost.run') as run, \
+                patch.object(sys, 'argv', [str(ROOT / 'vtuberAI.py')]):
             runpy.run_path(str(ROOT / 'vtuberAI.py'), run_name='__main__')
         run.assert_called_once()
 
@@ -41,6 +42,17 @@ class ModularAppTests(unittest.TestCase):
         self.assertIsNone(self.app.llm)
         self.assertIsNone(self.app.tts)
         self.assertIsNone(self.app.recognizer)
+
+    def test_startup_never_starts_optional_services_or_models(self):
+        with patch('vtuber.runtime.process_runtime.ServiceProcess') as service, patch.object(self.app, 'init_asr') as asr:
+            self.app.initialize_models()
+            service.return_value.start.assert_not_called()
+            service.return_value.call.assert_not_called()
+            asr.assert_not_called()
+        self.assertIsNone(self.app.llm)
+        self.assertIsNone(self.app.tts)
+        self.assertIsNone(self.app.recognizer)
+        self.assertFalse(hasattr(self.app, 'track_camera'))
 
     def test_dialogue_survives_restart_and_clear_preserves_records(self):
         self.app.llm = Mock()
@@ -81,6 +93,7 @@ class ModularAppTests(unittest.TestCase):
             release.wait(3)
 
         self.app.post_control_event = post
+        self.app.llm = Mock()
         self.app.generate_reply = lambda text, speaker, **kwargs: '回覆'
         self.app.synthesize = speak
         self.assertTrue(self.app.enqueue_twitch_message('甲', '第一則'))
@@ -100,6 +113,9 @@ class ModularAppTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
 
     def test_tracking_uses_application_settings(self):
+        from vtuber.disable.tracking import TrackingMixin
+        self.assertFalse(hasattr(self.app, 'track_camera'))
+        self.app.face_to_gaze = TrackingMixin.face_to_gaze.__get__(self.app)
         self.app.live2d_settings['camera_tracking'] = {'gain': 1, 'mirror': False}
         self.assertEqual(self.app.face_to_gaze((40, 40, 20, 20), 100, 100), (0, 0))
         self.assertEqual(self.app.face_to_gaze((80, 40, 20, 20), 100, 100), (0.8, 0))

@@ -9,7 +9,7 @@ import sys
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vtuber.twitch_chat import TwitchChat, EventSubClient
+from vtuber.twitch.twitch_chat import TwitchChat, EventSubClient
 
 
 class EventSubTests(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +46,18 @@ class EventSubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.request.call_args.kwargs['json']['message'], 'hi viewer')
         self.assertEqual(self.client.request.call_count, 1)
 
+    async def test_commands_skip_ai_but_still_reply(self):
+        for index, text in enumerate(['!ping test', '!unknown', '   !unknown', '!']):
+            event = copy.deepcopy(self.event)
+            event['message_id'] = f'command-{index}'
+            event['message']['text'] = text
+            event['badges'] = [{'set_id': 'moderator'}]
+            await self.client.notification(event)
+        self.assertFalse(self.received)
+        self.assertEqual(len(self.observed), 4)
+        self.assertEqual(self.client.request.call_count, 1)
+        self.assertEqual(self.client.request.call_args.kwargs['json']['message'], 'viewer: test')
+
     async def test_permissions_and_reload(self):
         e = copy.deepcopy(self.event)
         e['message']['text'] = '!ping one two'
@@ -58,6 +70,26 @@ class EventSubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.response(e), 'owner')
         self.commands.write_text('{"keywords": {"hello": "updated"}}', encoding='utf-8')
         self.assertEqual(self.client.response(self.event), 'updated')
+
+    async def test_rpg_uses_authenticated_id_and_skips_ai_and_custom_replies(self):
+        calls = []
+        self.chat.on_rpg_request = lambda *args: calls.append(args) or 'RPG 完成'
+        event = copy.deepcopy(self.event)
+        event['chatter_user_id'] = '123'
+        event['message']['text'] = '!rpg profile'
+        await self.client.notification(event)
+        await self.client.notification(event)
+        self.assertEqual(calls, [('123', 'Viewer', 'profile', 42)])
+        self.assertFalse(self.received)
+        self.assertEqual(self.client.request.call_count, 1)
+        self.assertEqual(self.client.request.call_args.kwargs['json']['message'], '@viewer RPG 完成')
+
+    async def test_rpg_link_code_is_not_saved_to_audience_history(self):
+        self.chat.on_rpg_request = lambda *args: 'ok'
+        event = copy.deepcopy(self.event)
+        event['message']['text'] = '!rpg link test-secret'
+        await self.client.notification(event)
+        self.assertNotIn('test-secret', self.observed[0][2])
 
     async def test_ignored_and_self_and_wrong_channel(self):
         self.chat.settings['ignored_users'] = ['VIEWER']

@@ -1,0 +1,507 @@
+import random
+
+from vtuber.rpg.idleology.core.combat import rewards
+from vtuber.rpg.idleology.core.combat.economy.config import (
+    BODY_PART_BASE_CHANCE,
+    BOSS_SIGIL_FIRST_CHANCE,
+    CORRUPTED_ESSENCE_CHANCE,
+    CORRUPTED_MIRAGE_RUNE_CHANCE,
+    CORRUPTED_PARADISE_JEWEL_CHANCE,
+    EGG_BASE_CHANCE,
+    MODIFIER_DIFFICULTY_CAP,
+    SIGIL_WORKER_MULTIPLIER,
+)
+from vtuber.rpg.idleology.core.combat.economy.loot import (
+    generate_accessory,
+    generate_armor,
+    generate_boot,
+    generate_glove,
+    generate_helmet,
+    generate_weapon,
+)
+from vtuber.rpg.idleology.core.emojis import BOOT_SLOT
+from vtuber.rpg.idleology.core.models import Player
+from vtuber.rpg.idleology.core.skills.mastery import get_skiller_bonus
+from vtuber.rpg.idleology.core.skills.mechanics import SkillMechanics
+
+# ---------------------------------------------------------------------------
+# Essence Drop Tables
+# ---------------------------------------------------------------------------
+
+_REGULAR_ESSENCE_TABLE = [
+    ("power", 30),
+    ("protection", 30),
+    ("insight", 6),
+    ("evasion", 8),
+    ("blocking", 8),
+    ("deftness", 6),
+    ("precision", 6),
+    ("gluttony", 6),
+    ("cleansing", 5),
+    ("chaos", 6),
+    ("annulment", 5),
+]
+_REGULAR_ESSENCE_POOL = [e for e, w in _REGULAR_ESSENCE_TABLE for _ in range(w)]
+_CORRUPTED_ESSENCE_POOL = ["aphrodite", "lucifer", "gemini", "neet"]
+
+# ---------------------------------------------------------------------------
+# Monster Body Part Drop Tables
+# ---------------------------------------------------------------------------
+
+_PART_SLOT_WEIGHTS = [
+    ("head", 0.400),
+    ("torso", 0.400),
+    ("right_arm", 0.045),
+    ("left_arm", 0.045),
+    ("right_leg", 0.045),
+    ("left_leg", 0.045),
+    ("cheeks", 0.010),
+    ("organs", 0.010),
+]
+_PART_SLOTS, _PART_WEIGHTS = zip(*_PART_SLOT_WEIGHTS)
+
+# ---------------------------------------------------------------------------
+# Monster Egg Drop Tables
+# ---------------------------------------------------------------------------
+
+_EGG_TIER_WEIGHTS = [
+    ("normal", 75),
+    ("rare", 20),
+    ("giga", 5),
+]
+_EGG_TIERS, _EGG_WEIGHTS = zip(*_EGG_TIER_WEIGHTS)
+
+
+def roll_monster_part(monster_name: str, ilvl: int) -> tuple:
+    """
+    Randomly selects a slot and rolls HP using a triangular distribution peaked at ilvl.
+    Returns (slot_type, hp_value).
+    """
+    slot = random.choices(_PART_SLOTS, weights=_PART_WEIGHTS, k=1)[0]
+    hp = max(1, int(random.triangular(ilvl * 0.5, ilvl * 1.5, ilvl)))
+    return slot, hp
+
+
+def roll_essence_drop() -> str:
+    """
+    Returns an essence type string for an essence-infused monster kill.
+    CORRUPTED_ESSENCE_CHANCE to return a corrupted essence, otherwise weighted regular table.
+    """
+    if random.random() < CORRUPTED_ESSENCE_CHANCE:
+        return random.choice(_CORRUPTED_ESSENCE_POOL)
+    return random.choice(_REGULAR_ESSENCE_POOL)
+
+
+class DropManager:
+    @staticmethod
+    async def proc_skiller(
+        bot, user_id: str, server_id: str, player: Player
+    ) -> str | None:
+        """
+        Rolls the Skiller boot passive or its soul stone equivalent.
+        Boot passive takes priority (conflict guard); soul stone fires only when
+        no skiller boot is equipped.
+        Returns a log message string if it procs, else None.
+        Shared by standard combat and ascent — do NOT call from codex.
+        """
+        if player.equipped_boot and player.equipped_boot.passive == "skiller":
+            proc_chance = player.equipped_boot.passive_lvl * 0.05
+        else:
+            _ss_tier = player.get_soul_stone_passive("skiller")
+            if not _ss_tier:
+                return None
+            from vtuber.rpg.idleology.core.apex.data import SOUL_STONE_TIER_VALUES
+
+            proc_chance = SOUL_STONE_TIER_VALUES["skiller"][_ss_tier - 1] / 100
+
+        skill_type = random.choice(["mining", "woodcutting", "fishing"])
+
+        # Apply Artisan Mastery Synergy Skiller bonus (if owned)
+        try:
+            mastery_row = await bot.database.skills.get_mastery(user_id, server_id)
+            chance_mult, yield_mult = get_skiller_bonus(mastery_row, skill_type)
+            proc_chance *= chance_mult
+        except Exception:
+            chance_mult, yield_mult = 1.0, 1.0
+
+        if random.random() >= proc_chance:
+            return None
+
+        skill_row = await bot.database.skills.get_data(user_id, server_id, skill_type)
+        if not skill_row:
+            return None
+        tool_tier = SkillMechanics.get_tool_tier(skill_type, skill_row)
+        resources = SkillMechanics.calculate_yield(skill_type, tool_tier)
+
+        # Apply yield multiplier from mastery
+        if yield_mult != 1.0:
+            for k in resources:
+                resources[k] = int(resources[k] * yield_mult)
+
+        await bot.database.skills.update_batch(
+            user_id, server_id, skill_type, resources
+        )
+        # NEET boot: Void Echo doubles skilling resource yield on proc
+        neet_suffix = ""
+        if player.get_boot_corrupted_essence() == "neet":
+            await bot.database.skills.update_batch(
+                user_id, server_id, skill_type, resources
+            )
+            neet_suffix = " (**Void Echo** doubled the yield!)"
+        msg_map = {"mining": "ores", "woodcutting": "logs", "fishing": "fish"}
+        return (
+            f"{BOOT_SLOT} **Skiller** found extra {msg_map[skill_type]}!{neet_suffix}"
+        )
+
+    @staticmethod
+    async def proc_speedster(
+        bot, user_id: str, server_id: str, player: Player
+    ) -> str | None:
+        """
+        Rolls the Speedster boot passive or its soul stone equivalent on victory
+        for a chance to gain 1 Combat Stamina (capped at 10).
+        Boot passive takes priority (conflict guard); soul stone fires only when
+        no speedster boot is equipped.
+        Returns a log message string if it procs, else None.
+        Only wired into standard combat (via process_drops) — deliberately not
+        called from Ascent, Uber, or Codex.
+        """
+        if player.equipped_boot and player.equipped_boot.passive == "speedster":
+            proc_chance = player.equipped_boot.passive_lvl * 0.03
+        else:
+            _ss_tier = player.get_soul_stone_passive("speedster")
+            if not _ss_tier:
+                return None
+            from vtuber.rpg.idleology.core.apex.data import SOUL_STONE_TIER_VALUES
+
+            proc_chance = SOUL_STONE_TIER_VALUES["speedster"][_ss_tier - 1] / 100
+
+        if random.random() >= proc_chance:
+            return None
+
+        await bot.database.users.add_stamina_capped(user_id, 1)
+        return f"{BOOT_SLOT} **Speedster** grants +1 Combat Stamina!"
+
+    @staticmethod
+    async def process_drops(
+        bot,
+        user_id: str,
+        server_id: str,
+        player: Player,
+        monster_level: int,
+        reward_data: dict,
+        monster=None,
+    ):
+        """
+        Handles DB updates for items, runes, and skill procs.
+
+        Special drop pool formula (body parts, eggs):
+            chance = base_rate
+                     + min(MODIFIER_DIFFICULTY_CAP, sum(m.difficulty for m in modifiers))
+                     + player.get_special_drop_bonus() / 100
+        """
+
+        # 0. Ensure essences list exists in reward_data
+        reward_data.setdefault("essences", [])
+
+        # Compute special drop pool bonus once — reused for body parts and eggs.
+        special_rarity = player.get_special_drop_bonus() / 100
+        if monster is not None:
+            mod_difficulty_bonus = min(
+                MODIFIER_DIFFICULTY_CAP,
+                sum(m.difficulty for m in monster.modifiers),
+            )
+        else:
+            mod_difficulty_bonus = 0.0
+        special_drop_chance = mod_difficulty_bonus + special_rarity
+
+        # 1. Skiller Boot Passive (Skill Mats)
+        skiller_msg = await DropManager.proc_skiller(bot, user_id, server_id, player)
+        if skiller_msg:
+            reward_data["msgs"].append(skiller_msg)
+
+        # 1a. Speedster Boot Passive (Combat Stamina)
+        speedster_msg = await DropManager.proc_speedster(bot, user_id, server_id, player)
+        if speedster_msg:
+            reward_data["msgs"].append(speedster_msg)
+
+        # 1b. Essence Monster Drop
+        if monster is not None and getattr(monster, "is_essence", False):
+            essence_type = roll_essence_drop()
+            await bot.database.essences.add(user_id, essence_type)
+            reward_data["essences"].append(essence_type)
+
+        # 1c. Monster Body Part Drop (normal, non-essence monsters only)
+        if monster is not None and not getattr(monster, "is_essence", False):
+            part_chance = BODY_PART_BASE_CHANCE + special_drop_chance
+            _part_roll = random.random()
+            reward_data.setdefault("rolls", {})
+            reward_data["rolls"]["part_chance_pct"] = round(part_chance * 100, 3)
+            reward_data["rolls"]["part_roll_pct"] = round(_part_roll * 100, 3)
+            reward_data["rolls"]["part_hit"] = _part_roll < part_chance
+            if _part_roll < part_chance:
+                slot, hp = roll_monster_part(monster.name, monster_level)
+                await bot.database.monster_parts.add_part(
+                    user_id, slot, monster.name, monster_level, hp
+                )
+                reward_data["body_part"] = (slot, monster.name, hp)
+
+        # 1d. Monster Egg Drop (normal monsters only — no bosses, ubers, corrupted, essence, or incubated) and player level >= 50
+        if (
+            monster is not None
+            and not getattr(monster, "is_essence", False)
+            and not getattr(monster, "is_boss", False)
+            and not getattr(monster, "is_uber", False)
+            and not getattr(monster, "is_corrupted", False)
+            and not getattr(monster, "is_incubated", False)
+            and player.level >= 50
+        ):
+            egg_chance = EGG_BASE_CHANCE + special_drop_chance
+            _egg_roll = random.random()
+            reward_data.setdefault("rolls", {})
+            reward_data["rolls"]["egg_chance_pct"] = round(egg_chance * 100, 3)
+            reward_data["rolls"]["egg_roll_pct"] = round(_egg_roll * 100, 3)
+            reward_data["rolls"]["egg_hit"] = _egg_roll < egg_chance
+            if _egg_roll < egg_chance:
+                egg_tier = random.choices(_EGG_TIERS, weights=_EGG_WEIGHTS, k=1)[0]
+                added = await bot.database.eggs.add_egg(
+                    user_id, egg_tier, monster_level, monster.name
+                )
+                if added:
+                    reward_data["egg"] = egg_tier
+
+        # 2. Gear Drops
+        # Aphrodite boot: lucky gear drops — roll twice, take the lower (more likely to beat threshold)
+        drop_roll = random.randint(1, 100)
+        if player.get_boot_corrupted_essence() == "aphrodite":
+            drop_roll = min(drop_roll, random.randint(1, 100))
+        drop_threshold = rewards.calculate_item_drop_chance(player)
+
+        reward_data.setdefault("rolls", {})
+        reward_data["rolls"]["gear_roll"] = drop_roll
+        reward_data["rolls"]["gear_threshold"] = drop_threshold
+        reward_data["rolls"]["gear_hit"] = drop_roll <= drop_threshold
+
+        if drop_roll <= drop_threshold:
+            chosen_slot = random.choices(
+                ["weapon", "accessory", "armor", "glove", "boot", "helmet"],
+                weights=[35, 25, 10, 10, 10, 10],
+                k=1,
+            )[0]
+            reward_data["rolls"]["item_slot"] = chosen_slot
+
+            # Helper to check inventory limit
+            async def check_limit(itype):
+                return await bot.database.equipment.get_count(user_id, itype) < 60
+
+            item_desc = None
+
+            if not await check_limit(chosen_slot):
+                pass  # inventory full, skip drop
+            elif chosen_slot == "weapon":
+                item = await generate_weapon(user_id, monster_level)
+                await bot.database.equipment.create_weapon(item)
+                item_desc = item.description
+            elif chosen_slot == "accessory":
+                item = await generate_accessory(user_id, monster_level)
+                await bot.database.equipment.create_accessory(item)
+                item_desc = item.description
+            elif chosen_slot == "armor":
+                item = await generate_armor(user_id, monster_level)
+                await bot.database.equipment.create_armor(item)
+                item_desc = item.description
+            elif chosen_slot == "glove":
+                item = await generate_glove(user_id, monster_level)
+                await bot.database.equipment.create_glove(item)
+                item_desc = item.description
+            elif chosen_slot == "boot":
+                item = await generate_boot(user_id, monster_level)
+                await bot.database.equipment.create_boot(item)
+                item_desc = item.description
+            else:  # helmet
+                item = await generate_helmet(user_id, monster_level)
+                await bot.database.equipment.create_helmet(item)
+                item_desc = item.description
+
+            if item_desc:
+                reward_data["items"].append({"type": chosen_slot, "desc": item_desc})
+
+
+# ---------------------------------------------------------------------------
+# Boss sigil & corrupted-monster drops (shared by CombatView and ascent)
+# ---------------------------------------------------------------------------
+
+# (name_fragment, building_key, uber_db_method, sigil_display)
+_BOSS_SIGIL_CONFIGS = [
+    ("Lucifer", "infernal_shrine", "increment_infernal_sigils", "Infernal Sigil"),
+    ("NEET", "void_shrine", "increment_void_shards", "Void Sigil"),
+    ("Aphrodite", "celestial_shrine", "increment_sigils", "Celestial Sigil"),
+    ("Gemini", "twin_shrine", "increment_gemini_sigils", "Bound Sigil"),
+]
+
+
+async def apply_incubated_monster_drops(
+    bot,
+    user_id: str,
+    monster,
+    reward_data: dict,
+) -> None:
+    """Awards blood and cleans up the incubated encounter queue entry on victory.
+
+    No-ops if the monster is not incubated.
+    """
+    if not getattr(monster, "is_incubated", False):
+        return
+
+    from vtuber.rpg.idleology.core.hatchery.mechanics import HatcheryMechanics
+
+    blood_amount = HatcheryMechanics.blood_reward(
+        monster.incubated_egg_tier, monster.level
+    )
+    blood_type = random.choice(["primordial", "evolutionary", "mutative"])
+
+    await bot.database.hematurgy.modify_blood(user_id, blood_type, blood_amount)
+    await bot.database.eggs.consume_incubated_encounter(monster.incubated_encounter_id)
+
+    blood_names = {
+        "primordial": "Primordial 🩸",
+        "evolutionary": "Evolutionary 🧬",
+        "mutative": "Mutative ☣️",
+    }
+    reward_data.setdefault("msgs", [])
+    reward_data["msgs"].append(
+        f"🩸 Incubated monster dropped **{blood_amount:,}x {blood_names[blood_type]}** blood!"
+    )
+
+
+async def apply_boss_sigil_drops(
+    bot,
+    user_id: str,
+    server_id: str,
+    monster,
+    reward_data: dict,
+    player=None,
+    velour_mult: int = 1,
+) -> None:
+    """
+    Rolls boss sigil drops for Lucifer / NEET / Aphrodite / Gemini.
+    Skips uber variants. Mutates reward_data['special'] in-place.
+
+    Drop formula:
+      • BOSS_SIGIL_FIRST_CHANCE (50 %) for the first sigil.
+      • building_workers × SIGIL_WORKER_MULTIPLIER × shrine_eff + Inner Sanctum
+        Deicide's Sigil Fortune bonus, chance for a bonus second sigil, where
+        shrine_eff (≥ 1.0) incorporates the sacred_ground plot bonus (+20 %)
+        and any adjacent Shrine Garden meta building (+15 %). Pass player to
+        apply these bonuses; omit for flat formula.
+
+    velour_mult — Velour's Fortune's Tide signature multiplier (2 when it
+    procs); applied to both the actual granted quantity and the displayed
+    entries, not just the display text.
+    """
+    if getattr(monster, "is_uber", False):
+        return
+
+    sigil_bonus = 0.0
+    if player is not None:
+        from vtuber.rpg.idleology.core.inner_sanctum.mechanics import get_tree_bonuses
+
+        sigil_bonus = get_tree_bonuses(getattr(player, "inner_sanctum_nodes", {}))[
+            "boss_sigil_chance_pct"
+        ]
+
+    for name_frag, building_key, incr_fn_name, sigil_name in _BOSS_SIGIL_CONFIGS:
+        if name_frag not in monster.name:
+            continue
+        _, building_workers = await bot.database.settlement.get_building_details(
+            user_id, server_id, building_key
+        )
+        if building_workers == 0:
+            _, uber_workers = await bot.database.settlement.get_building_details(
+                user_id, server_id, "uber_shrine"
+            )
+            building_workers = uber_workers // 5
+        shrine_eff = 1.0
+        if player is not None:
+            shrine_eff = getattr(player, "shrine_effectiveness", {}).get(
+                building_key, 1.0
+            )
+        sigils_dropped = 0
+        if random.random() < BOSS_SIGIL_FIRST_CHANCE:
+            sigils_dropped += 1
+        if random.random() < (
+            building_workers * SIGIL_WORKER_MULTIPLIER * shrine_eff + sigil_bonus
+        ):
+            sigils_dropped += 1
+        sigils_dropped *= velour_mult
+        incr_fn = getattr(bot.database.uber, incr_fn_name)
+        await incr_fn(user_id, server_id, sigils_dropped)
+        reward_data["special"].extend([sigil_name] * sigils_dropped)
+        break  # Only one boss type can match
+
+
+async def apply_corrupted_monster_drops(
+    bot,
+    user_id: str,
+    server_id: str,
+    monster,
+    reward_data: dict,
+    player=None,
+    velour_mult: int = 1,
+) -> None:
+    """
+    Handles drops from corrupted monsters. No-ops if monster is not corrupted.
+    Mutates reward_data['special'] in-place.
+
+    Drops:
+      - Guaranteed: Sigil of Corruption
+      - corruption_shrine_workers × SIGIL_WORKER_MULTIPLIER × shrine_eff chance
+        for a bonus second Sigil of Corruption (pass player to apply shrine_effectiveness).
+      - CORRUPTED_PARADISE_JEWEL_CHANCE (25 %): Uncut Paradise Jewel
+      - CORRUPTED_MIRAGE_RUNE_CHANCE (0.01 %): Rune of Mirage (Imperfect)
+
+    velour_mult — Velour's Fortune's Tide signature multiplier (2 when it
+    procs); applied to both the actual granted quantity and the displayed
+    entries, not just the display text.
+    """
+    if not getattr(monster, "is_corrupted", False):
+        return
+
+    # Guaranteed first sigil
+    await bot.database.uber.increment_corruption_sigils(user_id, server_id, velour_mult)
+    reward_data["special"].extend(["Sigil of Corruption"] * velour_mult)
+
+    # Corruption Shrine: bonus second sigil chance
+    _, corruption_workers = await bot.database.settlement.get_building_details(
+        user_id, server_id, "corruption_shrine"
+    )
+    if corruption_workers == 0:
+        _, uber_workers = await bot.database.settlement.get_building_details(
+            user_id, server_id, "uber_shrine"
+        )
+        corruption_workers = uber_workers // 5
+    if corruption_workers > 0:
+        shrine_eff = 1.0
+        if player is not None:
+            shrine_eff = getattr(player, "shrine_effectiveness", {}).get(
+                "corruption_shrine", 1.0
+            )
+        if random.random() < (
+            corruption_workers * SIGIL_WORKER_MULTIPLIER * shrine_eff
+        ):
+            await bot.database.uber.increment_corruption_sigils(
+                user_id, server_id, velour_mult
+            )
+            reward_data["special"].extend(["Sigil of Corruption"] * velour_mult)
+
+    if random.random() < CORRUPTED_PARADISE_JEWEL_CHANCE:
+        await bot.database.uber.increment_paradise_jewels(
+            user_id, server_id, velour_mult
+        )
+        reward_data["special"].extend(["Uncut Paradise Jewel"] * velour_mult)
+
+    if random.random() < CORRUPTED_MIRAGE_RUNE_CHANCE:
+        await bot.database.users.modify_currency(
+            user_id, "mirage_runes_imperfect", velour_mult
+        )
+        reward_data["special"].extend(["Rune of Mirage (Imperfect)"] * velour_mult)

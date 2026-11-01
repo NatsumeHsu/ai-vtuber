@@ -1,0 +1,343 @@
+from vtuber.rpg.localization import LocalizedModal
+import discord
+from discord import ButtonStyle, Interaction, ui
+
+from vtuber.rpg.idleology.core.base_view import BaseView
+from vtuber.rpg.idleology.core.emojis import GOLD_COIN, POTION
+from vtuber.rpg.idleology.core.images import CASINO_AUTHOR, TAVERN_CASINO
+from vtuber.rpg.idleology.core.npc_voices import get_quip
+
+# Import minigames directly to handle transitions without Cog
+from vtuber.rpg.idleology.core.minigames.views import (
+    BlackjackView,
+    CrashLaunchView,
+    HorseRaceView,
+    OneVOneView,
+    RouletteView,
+)
+from vtuber.rpg.idleology.core.tavern.mechanics import TavernMechanics
+
+
+def build_casino_lobby_embed(bet_amount: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="The Tavern Casino",
+        description=f"Table Stake: **{bet_amount:,} gold**. {get_quip('casino')}",
+        color=0xFFD700,
+    )
+    embed.set_author(name="Vespera", icon_url=CASINO_AUTHOR)
+    embed.set_thumbnail(url=TAVERN_CASINO)
+    embed.add_field(
+        name="🃏 Blackjack", value="Beat the dealer to 21. (2x Payout)", inline=True
+    )
+    embed.add_field(
+        name="🎡 Roulette", value="Red/Black/Numbers. (2x-35x Payout)", inline=True
+    )
+    embed.add_field(
+        name="🚀 Crash",
+        value="Cash out before the crash! (1.0x - ???x)",
+        inline=True,
+    )
+    embed.add_field(
+        name="🐎 Horse Racing", value="Pick the winner! (4x Payout)", inline=True
+    )
+    embed.add_field(
+        name="⚔️ 1v1",
+        value="Trade blows with Vespera herself. Lower HP hits harder. (2x Payout)",
+        inline=True,
+    )
+    return embed
+
+
+class ShopView(BaseView):
+    def __init__(self, bot, user_id: str, user_data: tuple):
+        super().__init__(bot, user_id)
+        self.gold = user_data["gold"]
+        self.potions = user_data["potions"]
+        self.level = user_data["level"]
+        self.potion_cost = TavernMechanics.calculate_potion_cost(self.level)
+        self._processing = False
+        self.update_buttons()
+
+    async def on_timeout(self):
+        self.bot.state_manager.clear_active(self.user_id)
+        for child in self.children:
+            child.disabled = True
+        try:
+            embed = self.message.embeds[0]
+            for i, field in enumerate(embed.fields):
+                if "tavernkeeper" in field.name.lower() or field.name == "Elara":
+                    embed.set_field_at(
+                        i,
+                        name="Elara",
+                        value="*Zzz...* (The shop has closed)",
+                        inline=False,
+                    )
+                    break
+            await self.message.edit(embed=embed, view=self)
+        except Exception:
+            pass
+
+    def _topup_qty(self) -> int:
+        return max(0, 20 - self.potions)
+
+    def update_buttons(self):
+        topup_qty = self._topup_qty()
+        topup_cost = self.potion_cost * topup_qty
+        self.children[0].disabled = self.gold < self.potion_cost or self.potions >= 20
+        self.children[1].disabled = (
+            self.gold < self.potion_cost * 5 or self.potions > 15
+        )
+        self.children[2].disabled = topup_qty == 0 or self.gold < topup_cost
+        self.children[2].label = f"Top Up ({topup_qty})"
+
+    async def refresh_ui(self, interaction: Interaction, msg: str):
+        embed = interaction.message.embeds[0]
+        embed.set_field_at(
+            0, name=f"Your Gold {GOLD_COIN}", value=f"{self.gold:,}", inline=False
+        )
+        topup_qty = self._topup_qty()
+        embed.set_field_at(
+            1,
+            name=f"Potion {POTION}",
+            value=(
+                f"x1: **{self.potion_cost:,}** gold\n"
+                f"x5: **{self.potion_cost * 5:,}** gold\n"
+                f"Top Up ({topup_qty}): **{self.potion_cost * topup_qty:,}** gold"
+            ),
+            inline=False,
+        )
+        embed.set_field_at(2, name="Elara", value=msg, inline=False)
+        self.update_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def process_potion_buy(self, interaction: Interaction, qty: int):
+        if self._processing:
+            await interaction.response.defer()
+            return
+        self._processing = True
+
+        cost = self.potion_cost * qty
+        ok = await self.bot.database.users.deduct_gold_atomic(self.user_id, cost)
+        if not ok:
+            self._processing = False
+            return await interaction.response.send_message(
+                "You don't have enough gold.", ephemeral=True
+            )
+        await self.bot.database.users.modify_stat(self.user_id, "potions", qty)
+        self.gold -= cost
+        self.potions += qty
+        msg = f"Here are your **{qty}** potions. Stay safe out there."
+        self._processing = False
+        await self.refresh_ui(interaction, msg)
+
+    @ui.button(label="x1", emoji=POTION, style=ButtonStyle.primary)
+    async def buy_one(self, interaction: Interaction, button: ui.Button):
+        await self.process_potion_buy(interaction, 1)
+
+    @ui.button(label="x5", emoji=POTION, style=ButtonStyle.primary)
+    async def buy_five(self, interaction: Interaction, button: ui.Button):
+        await self.process_potion_buy(interaction, 5)
+
+    @ui.button(label="Top Up", emoji=POTION, style=ButtonStyle.primary)
+    async def top_up(self, interaction: Interaction, button: ui.Button):
+        qty = self._topup_qty()
+        if qty == 0:
+            return await interaction.response.send_message(
+                "Your potions are already full.", ephemeral=True
+            )
+        await self.process_potion_buy(interaction, qty)
+
+    @ui.button(label="Close", style=ButtonStyle.secondary, emoji="✖️")
+    async def leave(self, interaction: Interaction, button: ui.Button):
+        await interaction.response.defer()
+        self.bot.state_manager.clear_active(self.user_id)
+        await interaction.delete_original_response()
+        self.stop()
+
+
+class RestView(BaseView):
+    def __init__(self, bot, user_id, cost, max_hp):
+        super().__init__(bot, user_id)
+        self.cost = cost
+        self.max_hp = max_hp
+        self._processing = False
+
+    @ui.button(label="Pay for a room?", style=ButtonStyle.success, emoji="🛏️")
+    async def confirm_rest(self, interaction: Interaction, button: ui.Button):
+        if self._processing:
+            await interaction.response.defer()
+            return
+        self._processing = True
+
+        await interaction.response.defer()
+        button.disabled = True
+        await interaction.edit_original_response(view=self)
+
+        # 1. Deduct Gold — atomic so a concurrent spend cannot push below zero
+        ok = await self.bot.database.users.deduct_gold_atomic(self.user_id, self.cost)
+        if not ok:
+            button.disabled = False
+            self._processing = False
+            await interaction.edit_original_response(view=self)
+            await interaction.followup.send(
+                "You don't have enough gold.", ephemeral=True
+            )
+            return
+        # 2. Heal
+        await self.bot.database.users.update_hp(self.user_id, self.max_hp)
+
+        embed = interaction.message.embeds[0]
+        embed.description = f"You paid **{self.cost}** gold.\nYou have rested and regained your health! Current HP: **{self.max_hp}**."
+        embed.clear_fields()  # Remove the payment prompt field
+
+        await interaction.edit_original_response(embed=embed, view=None)
+        self.bot.state_manager.clear_active(self.user_id)
+        self.stop()
+
+    @ui.button(label="Cancel", style=ButtonStyle.secondary)
+    async def cancel(self, interaction: Interaction, button: ui.Button):
+        await interaction.response.edit_message(
+            content="Rest cancelled.", embed=None, view=None
+        )
+        self.bot.state_manager.clear_active(self.user_id)
+        self.stop()
+
+
+class AdjustBetModal(LocalizedModal, title="Adjust Bet Amount"):
+    amount_input = ui.TextInput(
+        label="New bet amount (gold)",
+        placeholder="e.g. 5000",
+        min_length=1,
+        max_length=12,
+        required=True,
+    )
+
+    def __init__(self, parent_view: "CasinoMenuView"):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: Interaction):
+        raw = self.amount_input.value.replace(",", "").strip()
+        try:
+            amount = int(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                "Please enter a whole number, e.g. 5000.", ephemeral=True
+            )
+            return
+        if amount <= 0:
+            await interaction.response.send_message(
+                "Bet must be positive.", ephemeral=True
+            )
+            return
+
+        gold = await self.parent_view.bot.database.users.get_gold(
+            self.parent_view.user_id
+        )
+        if amount > gold:
+            await interaction.response.send_message(
+                f"Insufficient funds. You have **{gold:,}** gold.", ephemeral=True
+            )
+            return
+
+        self.parent_view.bet_amount = amount
+        embed = build_casino_lobby_embed(amount)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class CasinoMenuView(BaseView):
+    def __init__(self, bot, user_id, bet_amount):
+        super().__init__(bot, user_id)
+        self.bet_amount = bet_amount
+
+    async def on_timeout(self):
+        self.bot.state_manager.clear_active(self.user_id)
+        try:
+            await self.message.delete()
+        except Exception:
+            pass
+
+    async def _check_funds(self, interaction: Interaction):
+        # Re-check funds before starting game
+        gold = await self.bot.database.users.get_gold(self.user_id)
+        if gold < self.bet_amount:
+            await interaction.response.send_message(
+                "Insufficient funds!", ephemeral=True
+            )
+            return False
+        return True
+
+    @ui.button(label="Blackjack", emoji="🃏", style=ButtonStyle.primary, row=0)
+    async def blackjack(self, interaction: Interaction, button: ui.Button):
+        if not await self._check_funds(interaction):
+            return
+
+        view = BlackjackView(self.bot, self.user_id, self.bet_amount, interaction)
+        await interaction.response.defer()
+        await view.start_game()
+
+    @ui.button(label="Roulette", emoji="🎡", style=ButtonStyle.danger, row=0)
+    async def roulette(self, interaction: Interaction, button: ui.Button):
+        if not await self._check_funds(interaction):
+            return
+
+        embed = discord.Embed(
+            title="🎡 Roulette Table",
+            description=f"Betting **{self.bet_amount:,} gold**.\nChoose your wager:",
+            color=discord.Color.red(),
+        )
+        embed.set_thumbnail(url=TAVERN_CASINO)
+
+        view = RouletteView(self.bot, self.user_id, self.bet_amount, interaction)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @ui.button(label="Crash", emoji="🚀", style=ButtonStyle.success, row=1)
+    async def crash(self, interaction: Interaction, button: ui.Button):
+        if not await self._check_funds(interaction):
+            return
+
+        view = CrashLaunchView(self.bot, self.user_id, self.bet_amount, interaction)
+        await interaction.response.edit_message(embed=view._build_embed(), view=view)
+
+    @ui.button(label="Horse Racing", emoji="🐎", style=ButtonStyle.secondary, row=1)
+    async def horse(self, interaction: Interaction, button: ui.Button):
+        if not await self._check_funds(interaction):
+            return
+
+        view = HorseRaceView(self.bot, self.user_id, self.bet_amount, interaction)
+
+        embed = discord.Embed(
+            title="🐎 Horse Racing",
+            description=f"Betting **{self.bet_amount:,} gold**.\nPick your champion! (4x Payout)",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="1. Thunder Hoof 🐎", value="Balanced speed.", inline=True)
+        embed.add_field(
+            name="2. Lightning Bolt 🦄", value="High risk, high speed.", inline=True
+        )
+        embed.add_field(
+            name="3. Old Reliable 🦓", value="Consistent pace.", inline=True
+        )
+        embed.add_field(name="4. Dark Horse 🐫", value="Unpredictable.", inline=True)
+
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @ui.button(label="1v1", emoji="⚔️", style=ButtonStyle.danger, row=1)
+    async def one_v_one(self, interaction: Interaction, button: ui.Button):
+        if not await self._check_funds(interaction):
+            return
+
+        view = OneVOneView(self.bot, self.user_id, self.bet_amount, interaction)
+        await interaction.response.defer()
+        await view.start_game()
+
+    @ui.button(label="Adjust Bet", emoji="✏️", style=ButtonStyle.secondary, row=2)
+    async def adjust_bet(self, interaction: Interaction, button: ui.Button):
+        await interaction.response.send_modal(AdjustBetModal(self))
+
+    @ui.button(label="Cancel", emoji="❌", style=ButtonStyle.gray, row=2)
+    async def cancel(self, interaction: Interaction, button: ui.Button):
+        self.bot.state_manager.clear_active(self.user_id)
+        self.stop()
+        await interaction.response.defer()
+        await interaction.delete_original_response()

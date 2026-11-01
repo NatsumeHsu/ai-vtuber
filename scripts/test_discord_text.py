@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import discord
 import yaml
 from vtuber import VtuberAI
-from vtuber.discord_text import TextReplies
+from vtuber.discord.discord_text import TextReplies
 
 
 class TextTests(unittest.IsolatedAsyncioTestCase):
@@ -37,10 +37,10 @@ class TextTests(unittest.IsolatedAsyncioTestCase):
             webhook_id=None, created_at=datetime.now(timezone.utc))
 
     async def test_probability_boundary_and_last_ten_in_order(self):
-        with patch('vtuber.discord_text.secrets.randbelow', return_value=25000):
+        with patch('vtuber.discord.discord_text.secrets.randbelow', return_value=25000):
             await self.events['on_message'](self.message)
         self.channel.history.assert_not_called()
-        with patch('vtuber.discord_text.secrets.randbelow', return_value=24999):
+        with patch('vtuber.discord.discord_text.secrets.randbelow', return_value=24999):
             await self.events['on_message'](self.message)
         self.channel.history.assert_called_once_with(limit=10, before=self.message, oldest_first=False)
         payload = self.service.on_text_message.call_args.args[0]
@@ -49,7 +49,7 @@ class TextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_capture_when_generator_stopped(self):
         self.service.text_ready.return_value = False
-        with patch('vtuber.discord_text.secrets.randbelow', return_value=0):
+        with patch('vtuber.discord.discord_text.secrets.randbelow', return_value=0):
             await self.events['on_message'](self.message)
         self.channel.history.assert_not_called()
         self.service.on_text_message.assert_not_called()

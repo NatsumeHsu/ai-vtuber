@@ -7,16 +7,19 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import discord
-from vtuber.discord_voice import DiscordVoiceService
+from discord.ext import commands
+from types import SimpleNamespace
+from functools import partial
+from vtuber.discord.discord_voice import DiscordVoiceService
 
 
 class CommandTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1,
                                             'allowed_user_ids': [10]}, Mock(), Mock(), Mock())
-        self.service.client = discord.Client(intents=discord.Intents.none())
+        self.service.client = commands.Bot(command_prefix=[], help_command=None, intents=discord.Intents.none())
         self.service.channel_lock = asyncio.Lock()
-        self.tree = self.service.register_commands()
+        self.tree = await self.service.register_commands()
 
     async def asyncTearDown(self):
         await self.service.client.close()
@@ -31,7 +34,40 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         return result
 
     def command(self, name):
-        return self.tree.get_command(name)
+        command = self.tree.get_command(name)
+        return SimpleNamespace(callback=partial(command.callback, command.binding), parameters=command.parameters)
+
+    async def test_commands_are_native_cogs_with_bound_callbacks(self):
+        self.assertEqual(set(self.service.client.cogs),
+                         {'GeneralCommands', 'VoiceCommands', 'FunCommands', 'AccessCommands', 'MusicCommands', 'RPGCog'})
+        for command in self.tree.walk_commands():
+            if isinstance(command, discord.app_commands.Command):
+                self.assertIsInstance(command.binding, commands.Cog)
+        self.assertEqual(set(c.name for c in self.tree.get_command('discord-users').commands),
+                         {'add', 'remove', 'clear', 'list'})
+
+    async def test_owner_can_bootstrap_empty_allowlist(self):
+        self.service.settings['allowed_user_ids'] = []
+        self.service.manage_users = Mock(return_value=[20])
+        interaction = self.interaction(user=10)
+        interaction.guild.owner_id = 10
+        member = Mock(spec=discord.Member, id=20)
+        command = self.tree.get_command('discord-users').get_command('add')
+        await command.callback(command.binding, interaction, member)
+        self.service.manage_users.assert_called_once_with('add', 20)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+
+    async def test_allowlisted_nonowner_cannot_change_access(self):
+        self.service.manage_users = Mock()
+        for guild, user in ((1, 10), (99, 99), (None, 99)):
+            interaction = self.interaction(user=user, guild=guild)
+            interaction.guild.owner_id = 99
+            for name in ('clear', 'list'):
+                command = self.tree.get_command('discord-users').get_command(name)
+                await command.callback(command.binding, interaction)
+            interaction.response.defer.assert_not_awaited()
+        self.service.manage_users.assert_not_called()
 
     async def test_help_lists_registered_commands(self):
         interaction = self.interaction()
@@ -104,7 +140,7 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         await self.service.client.on_ready()
         await self.service.client.on_ready()
         self.assertEqual(self.tree.sync.await_args_list, [call(), call(guild=discord.Object(id=1))])
-        self.assertEqual(len(self.tree.get_commands()), 12)
+        self.assertEqual(len(self.tree.get_commands()), 15)
         self.assertEqual(self.tree.get_commands(guild=discord.Object(id=1)), [])
 
     async def test_failed_global_sync_does_not_clear_guild_commands_and_retries(self):
@@ -130,7 +166,7 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_roll_results_and_invalid_dice(self):
         interaction = self.interaction()
-        with patch('vtuber.discord_fun.secrets.randbelow', side_effect=[0, 5]):
+        with patch('vtuber.discord.discord_fun.secrets.randbelow', side_effect=[0, 5]):
             await self.command('roll').callback(interaction, '2d6')
         self.assertIn('合計 7', interaction.response.send_message.call_args.args[0])
         for dice in ('0d6', '21d6', '1d1', '1d1001', 'oops'):
@@ -140,7 +176,7 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_choose_and_poll_validate_options(self):
         interaction = self.interaction()
-        with patch('vtuber.discord_fun.secrets.choice', return_value='茶'):
+        with patch('vtuber.discord.discord_fun.secrets.choice', return_value='茶'):
             await self.command('choose').callback(interaction, '咖啡 | 茶')
         self.assertEqual(interaction.response.send_message.call_args.args[0], '抽中了：茶')
         self.assertFalse(interaction.response.send_message.call_args.kwargs['allowed_mentions'].everyone)

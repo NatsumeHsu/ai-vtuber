@@ -4,7 +4,7 @@ from unittest.mock import Mock
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 import yaml
-from vtuber.emotion_middleware import EmotionAnalyzer
+from vtuber.voiceAI.emotion_middleware import EmotionAnalyzer
 
 class EmotionTests(unittest.TestCase):
     def setUp(self):
@@ -33,7 +33,7 @@ class EmotionTests(unittest.TestCase):
         import tempfile
         import threading
         from opencc import OpenCC
-        from vtuber.index_tts_client import IndexTTSClient
+        from vtuber.voiceAI.index_tts_client import IndexTTSClient
         client=IndexTTSClient.__new__(IndexTTSClient)
         client.lock=threading.Lock()
         client.model=Mock()

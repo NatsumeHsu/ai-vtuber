@@ -1,0 +1,480 @@
+import asyncio
+from typing import Any
+
+import discord
+from discord import ButtonStyle, Interaction
+from discord.ui import Button
+
+from vtuber.rpg.idleology.core.base_view import BaseView
+from vtuber.rpg.idleology.core.companions.mechanics import CompanionMechanics
+from vtuber.rpg.idleology.core.emojis import (
+    CELESTIAL_ENGRAM,
+    ESSENCE_CORRUPT,
+    ESSENCE_RARE,
+    GEAR_ENCHANT,
+    GEAR_REINFORCE,
+    INFERNAL_ENGRAM,
+    RUNE_IMBUE,
+    RUNE_MIRAGE_PERFECT,
+    RUNE_REFINEMENT,
+    RUNE_SHATTER,
+    VOID_ENGRAM,
+    VOID_KEY,
+    WEAPON_FORGE,
+    WEAPON_REFINE,
+)
+from vtuber.rpg.idleology.core.images import VEYRA_AUTHOR
+from vtuber.rpg.idleology.core.inventory.inventory import InventoryUI
+from vtuber.rpg.idleology.core.inventory.upgrades import (
+    EngramView,
+    ForgeView,
+    ImbueView,
+    InfernalEngramView,
+    MirageView,
+    PotentialView,
+    RefineView,
+    ReinforceView,
+    TemperView,
+    VoidEngramView,
+    VoidforgeView,
+)
+from vtuber.rpg.idleology.core.inventory.views._slot_defs import SLOT_EMOJIS
+from vtuber.rpg.idleology.core.items.equipment_mechanics import EquipmentMechanics
+from vtuber.rpg.idleology.core.items.essence_mechanics import get_essence_slots
+
+# Core Imports
+from vtuber.rpg.idleology.core.models import Accessory, Armor, Boot, Glove, Helmet, Weapon
+
+
+class DiscardConfirmView(BaseView):
+    """Simple Yes/No view for deleting valuable items."""
+
+    def __init__(self, origin_view):
+        super().__init__(bot=origin_view.bot, parent=origin_view)
+        self.origin_view = origin_view  # Refers to ItemDetailView
+
+    async def interaction_check(self, interaction: Interaction) -> bool:
+        return str(interaction.user.id) == self.origin_view.user_id
+
+    @discord.ui.button(label="Discard", style=ButtonStyle.danger, emoji="🗑️")
+    async def confirm(self, interaction: Interaction, button: Button):
+        # Call back to the main view to handle logic
+        await self.origin_view.finalize_discard(interaction)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=ButtonStyle.secondary)
+    async def cancel(self, interaction: Interaction, button: Button):
+        # Go back to Item Detail View
+        embed = InventoryUI.get_item_details_embed(
+            self.origin_view.item, self.origin_view.is_equipped
+        )
+        await interaction.response.edit_message(
+            content=None, embed=embed, view=self.origin_view
+        )
+
+        self.stop()
+
+
+class ItemDetailView(BaseView):
+    """
+    Handles actions for a specific item. Dynamically generates buttons based on Item Type.
+    """
+
+    def __init__(self, bot, user_id: str, item: Any, parent_view: Any):
+        super().__init__(bot=bot, user_id=user_id)
+        self.bot = bot
+        self.user_id = user_id
+        self.item = item
+        self.parent = parent_view  # To support "Back" button
+
+        self.is_equipped = item.item_id == parent_view.equipped_id
+        self.void_keys = 0
+        self.mirage_runes_imperfect = 0
+        self.mirage_runes_perfected = 0
+        self._processing = False
+
+    async def fetch_data(self):
+        """Async setup to fetch currency/keys needed for button logic."""
+        cur = await self.bot.database.users.get_all_currencies(self.user_id)
+        if isinstance(self.item, Weapon):
+            self.void_keys = cur["void_keys"]
+        if isinstance(self.item, (Armor, Glove, Boot, Helmet)):
+            self.shatter_runes = cur["shatter_runes"]
+        self.mirage_runes_imperfect = cur["mirage_runes_imperfect"]
+        self.mirage_runes_perfected = cur["mirage_runes_perfected"]
+        self.setup_buttons()
+
+    def setup_buttons(self):
+        # 1. Equip/Unequip
+        self.clear_items()
+
+        label = "Unequip" if self.is_equipped else "Equip"
+        style = ButtonStyle.primary
+        equip_btn = Button(
+            label=label, style=style, emoji=SLOT_EMOJIS.get(self._get_db_type())
+        )
+        equip_btn.callback = self.toggle_equip
+        self.add_item(equip_btn)
+
+        # 2. Dynamic Upgrade Actions
+        if isinstance(self.item, Weapon):
+            if self.item.forges_remaining > 0:
+                self.add_upgrade_button(
+                    "Forge", ButtonStyle.success, "forge", emoji=WEAPON_FORGE
+                )
+            self.add_upgrade_button(
+                "Refine", ButtonStyle.secondary, "refine", emoji=WEAPON_REFINE
+            )
+
+            if (
+                self.void_keys > 0
+                and self.item.passive != "none"
+                and self.item.u_passive == "none"
+            ):
+                self.add_upgrade_button(
+                    "Voidforge", ButtonStyle.primary, "voidforge", emoji=VOID_KEY
+                )
+            self.add_upgrade_button(
+                "Infernal Engram",
+                ButtonStyle.danger,
+                "infernal_engram",
+                emoji=INFERNAL_ENGRAM,
+            )
+
+        elif isinstance(self.item, Armor):
+            if self.item.temper_remaining > 0:
+                self.add_upgrade_button(
+                    "Temper", ButtonStyle.success, "temper", emoji=WEAPON_FORGE
+                )
+            if self.item.imbue_remaining > 0 and self.item.passive == "none":
+                self.add_upgrade_button(
+                    "Imbue", ButtonStyle.primary, "imbue", emoji=RUNE_IMBUE
+                )
+            self.add_upgrade_button(
+                "Reinforce", ButtonStyle.primary, "reinforce", emoji=GEAR_REINFORCE
+            )
+            self.add_upgrade_button(
+                "Engram", ButtonStyle.danger, "engram", emoji=CELESTIAL_ENGRAM
+            )
+
+        elif isinstance(self.item, (Accessory, Glove, Boot, Helmet)):
+            max_lvl = (
+                10
+                if isinstance(self.item, Accessory)
+                else (5 if isinstance(self.item, (Glove, Helmet)) else 6)
+            )
+            if (
+                hasattr(self.item, "potential_remaining")
+                and self.item.potential_remaining > 0
+                and self.item.passive_lvl < max_lvl
+            ):
+                self.add_upgrade_button(
+                    "Enchant", ButtonStyle.success, "potential", emoji=GEAR_ENCHANT
+                )
+            if isinstance(self.item, Accessory):
+                self.add_upgrade_button(
+                    "Void Engram",
+                    ButtonStyle.secondary,
+                    "void_engram",
+                    emoji=VOID_ENGRAM,
+                )
+            if isinstance(self.item, (Glove, Boot, Helmet)):
+                self.add_upgrade_button(
+                    "Reinforce", ButtonStyle.primary, "reinforce", emoji=GEAR_REINFORCE
+                )
+                essence_btn = Button(
+                    label="Essences", style=ButtonStyle.primary, emoji=f"{ESSENCE_RARE}"
+                )
+                essence_btn.callback = self._open_essences
+                self.add_item(essence_btn)
+
+        # 3. Mirage (all item types, requires at least one rune)
+        if self.mirage_runes_imperfect > 0 or self.mirage_runes_perfected > 0:
+            self.add_upgrade_button(
+                "Mirage", ButtonStyle.secondary, "mirage", emoji=RUNE_MIRAGE_PERFECT
+            )
+
+        # 4. Standard Actions
+        discard_btn = Button(label="Discard", style=ButtonStyle.danger, emoji="🗑️")
+        discard_btn.callback = self.discard_item
+        self.add_item(discard_btn)
+
+        back_btn = Button(label="Back", style=ButtonStyle.secondary, emoji="⬅️")
+        back_btn.callback = self.go_back
+        self.add_item(
+            back_btn
+        )  # intra-inventory navigation (detail -> list) — do not clear_active
+
+    def add_upgrade_button(self, label, style, action_type, emoji=None):
+        btn = Button(label=label, style=style, emoji=emoji)
+        # Capture action_type in default arg
+        btn.callback = lambda i, at=action_type: self.handle_upgrade(i, at)
+        self.add_item(btn)
+
+    async def handle_upgrade(self, interaction: Interaction, action_type: str):
+        if self._processing:
+            await interaction.response.defer()
+            return
+        self._processing = True
+        await interaction.response.defer()
+        self.bot.state_manager.set_active(self.user_id, "upgrade")
+        view_map = {
+            "forge": ForgeView,
+            "refine": RefineView,
+            "temper": TemperView,
+            "imbue": ImbueView,
+            "potential": PotentialView,
+            "voidforge": VoidforgeView,
+            "reinforce": ReinforceView,
+            "engram": EngramView,
+            "infernal_engram": InfernalEngramView,
+            "void_engram": VoidEngramView,
+            "mirage": MirageView,
+        }
+
+        view_class = view_map.get(action_type)
+        if view_class:
+            view = view_class(self.bot, self.user_id, self.item, self)
+            await view.render(interaction)
+        else:
+            await interaction.followup.send("Unknown action.", ephemeral=True)
+
+    async def _open_essences(self, interaction: Interaction):
+        await interaction.response.defer()
+        from vtuber.rpg.idleology.core.items.essence_views import EssenceView
+
+        item_type = self._get_db_type()
+        essence_inventory = await self.bot.database.essences.get_all(self.user_id)
+        view = EssenceView(
+            self.bot, self.user_id, self.item, item_type, self, essence_inventory
+        )
+        await interaction.edit_original_response(embed=view._get_embed(), view=view)
+        view.message = await interaction.original_response()
+
+    # --- Actions ---
+
+    async def toggle_equip(self, interaction: Interaction):
+        if self._processing:
+            await interaction.response.defer()
+            return
+        self._processing = True
+
+        await interaction.response.defer()
+        itype = self._get_db_type()
+        if self.is_equipped:
+            await self.bot.database.equipment.unequip(self.user_id, itype)
+            self.parent.equipped_id = None
+            self.is_equipped = False
+        else:
+            await self.bot.database.equipment.equip(
+                self.user_id, self.item.item_id, itype
+            )
+            self.parent.equipped_id = self.item.item_id
+            self.is_equipped = True
+
+        await self.fetch_data()  # Re-check keys/status for button display
+        self._processing = False
+        embed = InventoryUI.get_item_details_embed(self.item, self.is_equipped)
+        await interaction.edit_original_response(embed=embed, view=self)
+        self.message = await interaction.original_response()
+
+    # --- DISCARD LOGIC ---
+
+    def _is_valuable(self) -> bool:
+        """Checks if item has any stats that make it worth confirming before delete."""
+        if isinstance(self.item, Weapon):
+            return (
+                self.item.passive != "none" and self.item.passive != ""
+            ) or self.item.refinement_lvl > 0
+
+        if isinstance(self.item, Armor):
+            return (
+                self.item.passive != "none" and self.item.passive != ""
+            ) or self.item.reinforcement_lvl > 0
+
+        # General check for other items
+        if (
+            hasattr(self.item, "passive")
+            and self.item.passive != "none"
+            and self.item.passive != ""
+        ):
+            return True
+        if hasattr(self.item, "passive_lvl") and self.item.passive_lvl > 0:
+            return True
+        if hasattr(self.item, "reinforcement_lvl") and self.item.reinforcement_lvl > 0:
+            return True
+
+        return False
+
+    def _build_discard_preview_embed(self) -> discord.Embed:
+        """Preview of what discarding self.item will grant/refund, shown before confirming."""
+        embed = discord.Embed(
+            title="⚠️ Confirm Discard",
+            description=(
+                f"Are you sure you want to discard **{self.item.name}** "
+                f"(Lv.{self.item.level})? This cannot be undone."
+            ),
+            color=discord.Color.orange(),
+        )
+
+        xp_val = CompanionMechanics.calculate_feed_xp(self.item)
+        if xp_val > 0:
+            embed.add_field(
+                name="🐾 Companion XP",
+                value=f"+{xp_val:,} XP added to your Companion XP pool.",
+                inline=False,
+            )
+
+        if isinstance(self.item, Weapon):
+            runes_back = EquipmentMechanics.calculate_refine_refund(self.item)
+            if runes_back > 0:
+                embed.add_field(
+                    name=f"{RUNE_REFINEMENT} Refinement Runes",
+                    value=f"**{runes_back}** rune(s) will be recovered.",
+                    inline=False,
+                )
+
+        if isinstance(self.item, (Armor, Glove, Boot, Helmet)):
+            shatter_back = EquipmentMechanics.calculate_shatter_refund(self.item)
+            if shatter_back > 0:
+                embed.add_field(
+                    name=f"{RUNE_SHATTER} Shatter Runes",
+                    value=f"**{shatter_back}** rune(s) will be recovered.",
+                    inline=False,
+                )
+                embed.set_author(name="Armorsmith Veyra", icon_url=VEYRA_AUTHOR)
+
+        if isinstance(self.item, (Glove, Boot, Helmet)):
+            from vtuber.rpg.idleology.core.items.essence_views import ESSENCE_DISPLAY
+
+            lines = []
+            for _, etype, _ in get_essence_slots(self.item):
+                e_name, emoji = ESSENCE_DISPLAY.get(etype, (etype.title(), "✦"))
+                lines.append(f"{emoji} {e_name}")
+            corrupted = getattr(self.item, "corrupted_essence", "none") or "none"
+            if corrupted != "none":
+                c_name, c_emoji = ESSENCE_DISPLAY.get(
+                    corrupted, (corrupted.title(), f"{ESSENCE_CORRUPT}")
+                )
+                lines.append(f"{c_emoji} {c_name} *(corrupted)*")
+            if lines:
+                embed.add_field(
+                    name=f"{ESSENCE_RARE} Essences Lost",
+                    value="\n".join(lines),
+                    inline=False,
+                )
+
+        return embed
+
+    async def discard_item(self, interaction: Interaction):
+        # 1. Check if valuable
+        if self._is_valuable():
+            confirm_view = DiscardConfirmView(self)
+            await interaction.response.edit_message(
+                content=None,
+                embed=self._build_discard_preview_embed(),
+                view=confirm_view,
+            )
+            self.message = await interaction.original_response()
+        else:
+            # 2. Not valuable, delete immediately
+            await self.finalize_discard(interaction)
+
+    async def finalize_discard(self, interaction: Interaction):
+        """Performs the actual DB deletion and returns to list via a brief flash."""
+        if self._processing:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            return
+        self._processing = True
+
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+
+        itype = self._get_db_type()
+
+        # --- [FEED LOGIC] — pool XP for manual distribution via Companions view ---
+        xp_msg = ""
+        total_xp_val = CompanionMechanics.calculate_feed_xp(self.item)
+        if total_xp_val > 0:
+            await self.bot.database.users.modify_currency(
+                self.user_id, "companion_pet_xp", total_xp_val
+            )
+            xp_msg = f"\n🐾 **+{total_xp_val:,} XP** added to your Companion XP pool."
+
+        # Discard DB
+        await self.bot.database.equipment.discard(self.item.item_id, itype)
+
+        # Weapon refinement rune refund
+        rune_msg = ""
+        if isinstance(self.item, Weapon):
+            runes_back = EquipmentMechanics.calculate_refine_refund(self.item)
+            if runes_back > 0:
+                await self.bot.database.users.modify_currency(
+                    self.user_id, "refinement_runes", runes_back
+                )
+                rune_msg = f"\n{RUNE_REFINEMENT} Recovered **{runes_back}** Refinement Rune(s)."
+
+        # Armor/Glove/Boot/Helmet shatter rune refund
+        shatter_back = 0
+        if isinstance(self.item, (Armor, Glove, Boot, Helmet)):
+            shatter_back = EquipmentMechanics.calculate_shatter_refund(self.item)
+            if shatter_back > 0:
+                await self.bot.database.users.modify_currency(
+                    self.user_id, "shatter_runes", shatter_back
+                )
+                rune_msg += (
+                    f"\n{RUNE_SHATTER} Recovered **{shatter_back}** Shatter Rune(s)."
+                )
+
+        # Update List State
+        self.parent.items = [
+            i for i in self.parent.items if i.item_id != self.item.item_id
+        ]
+        self.parent.total_pages = max(
+            1,
+            (len(self.parent.items) + self.parent.items_per_page - 1)
+            // self.parent.items_per_page,
+        )
+        if self.parent.current_page >= self.parent.total_pages:
+            self.parent.current_page = max(0, self.parent.total_pages - 1)
+        self.parent.update_buttons()
+
+        # Brief Popup (Replaces the annoying ephemeral followup)
+        temp_embed = discord.Embed(title="Item Discarded", color=discord.Color.red())
+        temp_embed.description = (
+            f"🗑️ **{self.item.name}** was dismantled.{xp_msg}{rune_msg}"
+        )
+        if shatter_back > 0:
+            temp_embed.set_author(name="Armorsmith Veyra", icon_url=VEYRA_AUTHOR)
+
+        await interaction.edit_original_response(
+            content=None, embed=temp_embed, view=None
+        )
+        await asyncio.sleep(1.0)  # Wait 1.5s
+
+        # Return to List View
+        embed = await self.parent.get_current_embed()
+        await interaction.edit_original_response(embed=embed, view=self.parent)
+
+    async def go_back(self, interaction: Interaction):
+        # Back navigation within inventory session (detail -> list). Do not clear_active.
+        self.parent.update_buttons()
+        embed = await self.parent.get_current_embed()
+        await interaction.response.edit_message(embed=embed, view=self.parent)
+        self.message = await interaction.original_response()
+
+    def _get_db_type(self) -> str:
+        if isinstance(self.item, Weapon):
+            return "weapon"
+        if isinstance(self.item, Armor):
+            return "armor"
+        if isinstance(self.item, Accessory):
+            return "accessory"
+        if isinstance(self.item, Glove):
+            return "glove"
+        if isinstance(self.item, Boot):
+            return "boot"
+        if isinstance(self.item, Helmet):
+            return "helmet"
+        return "weapon"

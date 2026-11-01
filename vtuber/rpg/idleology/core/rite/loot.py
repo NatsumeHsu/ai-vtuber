@@ -1,0 +1,215 @@
+"""Run-completion rewards for The Rite of Convergence.
+
+Base (non-artefact) loot reuses the Black Market's hidden-value roll
+pipeline verbatim — a flat value scaled by excess Devotion Points is turned
+into itemized rewards via the same code path an instant Black Market deal
+uses (core/settlement/turn_engine.py: complete_bm_deal_instant).
+"""
+
+import random
+
+from vtuber.rpg.idleology.core.images import (
+    ARTEFACT_BLESSED_BULWARK,
+    ARTEFACT_BRAND_OF_RUIN,
+    ARTEFACT_CORRUPTED_INSIGNIA,
+    ARTEFACT_SAD_ONES_GAMBLE,
+    ARTEFACT_THE_FINAL_EDICT,
+    MONSTER_GEMINI_REBORN,
+)
+from vtuber.rpg.idleology.core.rite.data import max_devotion_points
+from vtuber.rpg.idleology.core.settlement.turn_engine import complete_bm_deal_instant
+
+BASE_LOOT_VALUE = 300_000
+
+ARTEFACT_TIER_1_DP = 60
+ARTEFACT_TIER_2_DP = 130
+ARTEFACT_TIER_3_DP = 350
+
+# RAID-DESIGN.md doesn't specify an overall "does an artefact drop at all"
+# chance — only the relative weights BETWEEN artefacts once eligible. The
+# drop chance scales with DP: ARTEFACT_DROP_CHANCE_BASE at the Tier 1
+# threshold (the minimum to be eligible at all), ramping linearly up to
+# ARTEFACT_DROP_CHANCE_CAP at the maximum DP achievable with every writ
+# picked — pushing DP doesn't just widen the artefact pool, it also raises
+# the odds of hitting it at all. See artefact_drop_chance() below.
+ARTEFACT_DROP_CHANCE_BASE = 0.20
+ARTEFACT_DROP_CHANCE_CAP = 0.40
+
+# key -> (display name, thematic source, dp required to enter the pool, weight, image)
+# NOTE: Seal of Duality has no dedicated artefact asset yet — falls back to
+# MONSTER_GEMINI_REBORN until one is provided.
+ARTEFACT_TABLE: dict[str, tuple[str, str, int, int, str]] = {
+    "blessed_bulwark": (
+        "Blessed Bulwark",
+        "Aphrodite",
+        ARTEFACT_TIER_1_DP,
+        25,
+        ARTEFACT_BLESSED_BULWARK,
+    ),
+    "brand_of_ruin": (
+        "Brand of Ruin",
+        "Lucifer",
+        ARTEFACT_TIER_1_DP,
+        25,
+        ARTEFACT_BRAND_OF_RUIN,
+    ),
+    "seal_of_duality": (
+        "Seal of Duality",
+        "Gemini",
+        ARTEFACT_TIER_1_DP,
+        25,
+        MONSTER_GEMINI_REBORN,
+    ),
+    "sad_ones_gamble": (
+        "Sad One's Gamble",
+        "NEET",
+        ARTEFACT_TIER_2_DP,
+        10,
+        ARTEFACT_SAD_ONES_GAMBLE,
+    ),
+    "corrupted_insignia": (
+        "Corrupted Insignia",
+        "Evelynn",
+        ARTEFACT_TIER_2_DP,
+        10,
+        ARTEFACT_CORRUPTED_INSIGNIA,
+    ),
+    "the_final_edict": (
+        "The Final Edict",
+        "Arbiter",
+        ARTEFACT_TIER_3_DP,
+        5,
+        ARTEFACT_THE_FINAL_EDICT,
+    ),
+}
+
+
+def excess_dp_bonus_pct(total_dp: int) -> float:
+    """% bonus to non-artefact loot value from DP above 350, capped at 65%."""
+    if total_dp <= 350:
+        return 0.0
+    return min(65.0, (total_dp - 350) / 10)
+
+
+def effective_loot_value(total_dp: int) -> int:
+    return int(BASE_LOOT_VALUE * (1 + excess_dp_bonus_pct(total_dp) / 100))
+
+
+def artefact_drop_chance(total_dp: int) -> float:
+    """Linearly scales the artefact drop chance from ARTEFACT_DROP_CHANCE_BASE
+    (at ARTEFACT_TIER_1_DP, the minimum to be eligible at all) up to
+    ARTEFACT_DROP_CHANCE_CAP (at max_devotion_points(), i.e. every writ
+    picked). Below the Tier 1 threshold this is moot — roll_artefact_key
+    already returns None before the chance is ever checked."""
+    span = max_devotion_points() - ARTEFACT_TIER_1_DP
+    if span <= 0 or total_dp <= ARTEFACT_TIER_1_DP:
+        return ARTEFACT_DROP_CHANCE_BASE
+    progress = min(1.0, (total_dp - ARTEFACT_TIER_1_DP) / span)
+    return (
+        ARTEFACT_DROP_CHANCE_BASE
+        + (ARTEFACT_DROP_CHANCE_CAP - ARTEFACT_DROP_CHANCE_BASE) * progress
+    )
+
+
+def roll_artefact_key(total_dp: int) -> str | None:
+    """Rolls whether an artefact drops and, if so, which one — weighted among
+    whatever tiers `total_dp` has unlocked. Returns None on no drop."""
+    eligible = [
+        (key, weight)
+        for key, (_name, _source, req_dp, weight, _image) in ARTEFACT_TABLE.items()
+        if total_dp >= req_dp
+    ]
+    if not eligible or random.random() > artefact_drop_chance(total_dp):
+        return None
+    keys, weights = zip(*eligible)
+    return random.choices(keys, weights=weights, k=1)[0]
+
+
+def roll_artefact_stats(key: str) -> tuple[float, float, float]:
+    """Rolls the randomized stat value(s) for a freshly-dropped artefact.
+    Unused rolls stay 0.0. Ranges are taken directly from RAID-DESIGN.md."""
+    lo_hi = ROLL_1_RANGE.get(key)
+    if lo_hi:
+        return (float(random.randint(*lo_hi)), 0.0, 0.0)
+    # sad_ones_gamble / corrupted_insignia have no variable roll
+    return (0.0, 0.0, 0.0)
+
+
+# key -> (min, max) for roll_1, used both by roll_artefact_stats above and by
+# the Gear view's Artefact detail panel to show "how good is this roll".
+# Kept as data rather than re-deriving from roll_artefact_stats so the UI
+# doesn't need to call random.randint just to learn the bounds.
+ROLL_1_RANGE: dict[str, tuple[int, int]] = {
+    "blessed_bulwark": (2, 8),  # PDR cap +2-8%
+    "brand_of_ruin": (15, 30),  # infernal passive +15-30%
+    "seal_of_duality": (15, 35),  # DEF +15-35% on ward break
+    "the_final_edict": (80, 100),  # true damage chance 80-100%
+}
+
+
+def roll_1_range(key: str) -> tuple[int, int] | None:
+    """(min, max) for the artefact's roll_1 stat, or None if it has no
+    variable roll (sad_ones_gamble / corrupted_insignia)."""
+    return ROLL_1_RANGE.get(key)
+
+
+def describe_artefact(key: str, roll_1: float) -> str:
+    """Human-readable effect description for the /artefact command, including
+    the rolled value where relevant."""
+    if key == "blessed_bulwark":
+        return f"PDR cap increased by {int(roll_1)}%. Cannot be lowered in combat."
+    if key == "brand_of_ruin":
+        return f"Your weapon's infernal passive is {int(roll_1)}% stronger."
+    if key == "seal_of_duality":
+        return f"On ward break: gain DEF +{int(roll_1)}% for the remainder of combat."
+    if key == "sad_ones_gamble":
+        return (
+            "Start of combat: roll a d6. 2-5: Unlucky effects become Lucky. "
+            "6: also, Lucky effects roll 3x instead of twice. 1: no effect."
+        )
+    if key == "corrupted_insignia":
+        return "On crit: 50% chance for on-hit-only passives to also apply."
+    if key == "the_final_edict":
+        return f"On hit: {int(roll_1)}% chance for the whole hit to become true damage."
+    return "Unknown artefact."
+
+
+async def grant_run_completion_rewards(
+    bot, user_id: str, server_id: str, player, total_dp: int
+) -> dict:
+    """Grants the base loot payout for a completed Rite run and, if eligible,
+    rolls + equips a new Artefact. Returns a summary dict for the victory screen."""
+    value = effective_loot_value(total_dp)
+    bm_rewards = await complete_bm_deal_instant(
+        bot,
+        user_id,
+        server_id,
+        value,
+        active_biases=[],
+        player_level=player.level,
+        tree_nodes={},
+    )
+
+    artefact_key = roll_artefact_key(total_dp)
+    artefact_name = None
+    artefact_image = None
+    artefact_inventory_full = False
+    if artefact_key:
+        roll_1, roll_2, roll_3 = roll_artefact_stats(artefact_key)
+        new_id = await bot.database.rite.add_artefact(
+            user_id, server_id, artefact_key, roll_1, roll_2, roll_3, auto_equip=True
+        )
+        artefact_inventory_full = new_id is None
+        if not artefact_inventory_full:
+            artefact_name = ARTEFACT_TABLE[artefact_key][0]
+            artefact_image = ARTEFACT_TABLE[artefact_key][4]
+
+    return {
+        "value": value,
+        "excess_dp_bonus_pct": excess_dp_bonus_pct(total_dp),
+        "bm_rewards": bm_rewards,
+        "artefact_key": artefact_key,
+        "artefact_name": artefact_name,
+        "artefact_image": artefact_image,
+        "artefact_inventory_full": artefact_inventory_full,
+    }

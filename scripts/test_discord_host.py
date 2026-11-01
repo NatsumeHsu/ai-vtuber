@@ -8,10 +8,10 @@ from unittest.mock import Mock, AsyncMock, patch
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vtuber.config import update_settings
-from vtuber.discord_voice import DiscordVoiceService
-from vtuber.discord_host import DiscordHost
-from vtuber.process_runtime import Peer
+from vtuber.core.config import update_settings
+from vtuber.discord.discord_voice import DiscordVoiceService
+from vtuber.discord.discord_host import DiscordHost
+from vtuber.runtime.ipc import Peer
 
 
 def desktop_probe(connection, settings_path):
@@ -27,9 +27,30 @@ def desktop_probe(connection, settings_path):
 
 class HostTests(unittest.TestCase):
     def setUp(self):
-        factory = patch('vtuber.discord_voice.DiscordVoiceService')
+        factory = patch('vtuber.discord.discord_voice.DiscordVoiceService')
         self.host_factory = factory.start()
         self.addCleanup(factory.stop)
+
+    def test_access_settings_persist_and_take_effect_without_restart(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'setting.yml'
+            path.write_text('discord:\n  bot_token: private\n  guild_id: 1\n  allowed_user_ids: []\ntwitch: {channel: keep}\n', encoding='utf-8')
+            host = DiscordHost(path)
+            host.discord = DiscordVoiceService(host.settings['discord'], Mock(), Mock(), Mock())
+            self.assertEqual(host.manage_users('add', 20), [20])
+            self.assertTrue(host.discord.command_allowed(20, 1))
+            self.assertEqual(host.manage_users('add', 20), [20])
+            self.assertEqual(host.manage_users('remove', 20), [])
+            self.assertFalse(host.discord.command_allowed(20, 1))
+            host.manage_users('add', 30)
+            self.assertEqual(host.manage_users('clear'), [])
+            saved = yaml.safe_load(path.read_text(encoding='utf-8'))
+            self.assertEqual(saved['discord']['allowed_user_ids'], [])
+            self.assertEqual(saved['discord']['bot_token'], 'private')
+            self.assertEqual(saved['twitch']['channel'], 'keep')
+            with self.assertRaises(ValueError):
+                host.manage_users('add', -1)
 
     def test_no_saved_voice_channel_is_required_or_written(self):
         service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1}, Mock(), Mock(), Mock())
@@ -124,7 +145,7 @@ class HostTests(unittest.TestCase):
                 self.assertEqual(host.discord.settings['allowed_user_ids'], [42])
             finally:
                 if host.peer:
-                    host.peer.call('shutdown')
+                    host.dispatch('shutdown_host')
                 thread.join(10)
             self.assertFalse(thread.is_alive())
     def test_host_and_desktop_real_spawn_routing(self):
@@ -151,7 +172,7 @@ class HostTests(unittest.TestCase):
                         break
                     time.sleep(0.05)
                 self.assertEqual(yaml.safe_load(path.read_text(encoding='utf-8'))['twitch']['channel'], 'updated_by_child')
-                host.peer.call('shutdown')
+                host.dispatch('shutdown_host')
             finally:
                 thread.join(10)
             self.assertFalse(thread.is_alive())
@@ -159,12 +180,13 @@ class HostTests(unittest.TestCase):
 
     def test_slash_command_denies_unlisted_users_before_moving(self):
         import discord
+        from discord.ext import commands
         async def run():
             service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1,
                                            'allowed_user_ids': [10]}, Mock(), Mock(), Mock())
-            service.client = discord.Client(intents=discord.Intents.none())
+            service.client = commands.Bot(command_prefix=[], help_command=None, intents=discord.Intents.none())
             service.change_channel = AsyncMock()
-            tree = service.register_commands()
+            tree = await service.register_commands()
             command = tree.get_command('join')
             interaction = Mock()
             interaction.user.id = 11
@@ -174,11 +196,11 @@ class HostTests(unittest.TestCase):
             interaction.followup.send = AsyncMock()
             channel = Mock(spec=discord.VoiceChannel, id=3)
             interaction.user.voice.channel = channel
-            await command.callback(interaction)
+            await command.callback(command.binding, interaction)
             service.change_channel.assert_not_awaited()
             interaction.response.send_message.assert_awaited_once()
             interaction.user.id = 10
-            await command.callback(interaction)
+            await command.callback(command.binding, interaction)
             service.change_channel.assert_awaited_once_with(3)
             await service.client.close()
         asyncio.run(run())
@@ -217,6 +239,7 @@ class HostTests(unittest.TestCase):
 
     def test_channel_move_and_guild_validation(self):
         import discord
+        from discord.ext import commands
         async def run():
             service = DiscordVoiceService({'bot_token': 'test', 'guild_id': 1}, Mock(), Mock(), Mock())
             channel = Mock(spec=discord.VoiceChannel)

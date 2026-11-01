@@ -18,6 +18,8 @@ twitch:
 
 # Live2D 模型與表情標記對應（右側為模型內的表情名稱）。
 live2d:
+  web:
+    port: 8765  # 本機角色網頁／OBS 瀏覽器來源
   camera_tracking:
     gestures:
       enabled: true
@@ -300,3 +302,13 @@ discord:
     enabled: true
     probability: 0.025
     context_messages: 10
+
+# YouTube 點歌台：無需載入 AI，由本機網頁／OBS 播放
+music:
+  max_queue: 100
+
+# Idleology 共用 RPG：使用 Discord 主伺服器，Twitch 透過主服務共用存檔
+rpg:
+  enabled: true
+  database: data/rpg.sqlite3
+  link_ttl_seconds: 300

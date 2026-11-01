@@ -1,0 +1,114 @@
+from vtuber.rpg.localization import LocalizedModal
+import asyncio
+
+import discord
+from discord import Interaction
+
+from vtuber.rpg.idleology.core.companions.mechanics import CompanionMechanics
+from vtuber.rpg.idleology.core.emojis import RUNE_REFINEMENT
+from vtuber.rpg.idleology.core.items.equipment_mechanics import EquipmentMechanics
+from vtuber.rpg.idleology.core.models import Weapon
+
+
+class MassDiscardModal(LocalizedModal, title="Mass Discard"):
+    level_input = discord.ui.TextInput(
+        label="Max Item Level to Discard",
+        placeholder="e.g. 50 (Discards <= 50)",
+        min_length=1,
+        max_length=3,
+    )
+
+    def __init__(self, parent_view):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: Interaction):
+        try:
+            level_limit = int(self.level_input.value)
+        except ValueError:
+            return await interaction.response.send_message(
+                "Please enter a valid number.", ephemeral=True
+            )
+
+        # Filter logic: Must not be equipped, must be <= requested level
+        items_to_delete = [
+            item
+            for item in self.parent_view.items
+            if not getattr(item, "is_equipped", False) and item.level <= level_limit
+        ]
+
+        if not items_to_delete:
+            return await interaction.response.send_message(
+                f"No unequipped items found at or below level {level_limit}.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer()
+
+        itype = self.parent_view._get_db_type()
+        total_xp_val = 0
+        total_runes_back = 0
+
+        # Execute DB Deletions
+        for item in items_to_delete:
+            total_xp_val += CompanionMechanics.calculate_feed_xp(item)
+            if isinstance(item, Weapon):
+                total_runes_back += EquipmentMechanics.calculate_refine_refund(item)
+            await self.parent_view.bot.database.equipment.discard(item.item_id, itype)
+
+        # Pool XP for manual distribution via Companions view
+        xp_msg = ""
+        if total_xp_val > 0:
+            await self.parent_view.bot.database.users.modify_currency(
+                self.parent_view.user_id, "companion_pet_xp", total_xp_val
+            )
+            xp_msg = f"\n🐾 **+{total_xp_val:,} XP** added to your Companion XP pool."
+
+        # Weapon refinement rune refund (mirrors single-item discard)
+        rune_msg = ""
+        if total_runes_back > 0:
+            await self.parent_view.bot.database.users.modify_currency(
+                self.parent_view.user_id, "refinement_runes", total_runes_back
+            )
+            rune_msg = (
+                f"\n{RUNE_REFINEMENT} Recovered **{total_runes_back}** "
+                "Refinement Rune(s)."
+            )
+
+        # Update List State
+        deleted_ids = {i.item_id for i in items_to_delete}
+        self.parent_view.items = [
+            i for i in self.parent_view.items if i.item_id not in deleted_ids
+        ]
+
+        # Recalculate pages
+        self.parent_view.total_pages = max(
+            1,
+            (len(self.parent_view.items) + self.parent_view.items_per_page - 1)
+            // self.parent_view.items_per_page,
+        )
+        if self.parent_view.current_page >= self.parent_view.total_pages:
+            self.parent_view.current_page = max(0, self.parent_view.total_pages - 1)
+
+        self.parent_view.update_buttons()
+
+        # Replace the view with a summary embed of the bulk discard result.
+        temp_embed = discord.Embed(
+            title="Mass Discard Complete", color=discord.Color.red()
+        )
+        temp_embed.description = (
+            f"🗑️ Dismantled **{len(items_to_delete)}** items "
+            f"(Level <= {level_limit}).{xp_msg}{rune_msg}"
+        )
+
+        await interaction.edit_original_response(
+            content=None, embed=temp_embed, view=None
+        )
+
+        await asyncio.sleep(1.5)
+
+        # Revert to List View
+        list_embed = await self.parent_view.get_current_embed()
+        await interaction.edit_original_response(
+            embed=list_embed, view=self.parent_view
+        )

@@ -1,0 +1,386 @@
+# core/companions/mechanics.py
+
+import random
+from datetime import datetime
+from typing import Any, Dict, List, Tuple
+
+from vtuber.rpg.idleology.core.models import Companion, Weapon
+
+
+class CompanionMechanics:
+    # --- CONSTANTS ---
+    PASSIVE_TYPES = ["atk", "def", "hit", "crit", "ward", "rarity", "fdr", "pdr"]
+    RARE_PASSIVE_TYPES = ["s_rarity"]  # Special Rarity is rarer
+
+    MAX_LEVEL = 100
+    COLLECTION_INTERVAL_SECONDS = 3600  # 1 Hour
+
+    PASSIVE_TYPE_LABELS = {
+        "atk": "ATK",
+        "def": "DEF",
+        "hit": "Hit",
+        "crit": "Crit",
+        "ward": "Ward",
+        "rarity": "Rarity",
+        "s_rarity": "Special Rarity",
+        "fdr": "FDR",
+        "pdr": "PDR",
+    }
+
+    @staticmethod
+    def passive_label(passive_type: str) -> str:
+        """Human-readable display name for a passive type (e.g. 's_rarity' -> 'Special Rarity')."""
+        return CompanionMechanics.PASSIVE_TYPE_LABELS.get(
+            passive_type, passive_type.upper()
+        )
+
+    # --- XP & LEVELING ---
+
+    @staticmethod
+    def calculate_next_level_xp(current_level: int) -> int:
+        """XP needed to reach next level: Level * 100."""
+        if current_level >= CompanionMechanics.MAX_LEVEL:
+            return 999999999
+        return current_level * 100
+
+    @staticmethod
+    def calculate_feed_xp(item: Any) -> int:
+        """Determines XP value of an item based on its stats/type."""
+        xp = 10  # Base for generic junk
+
+        # Scale based on item level
+        if hasattr(item, "level"):
+            xp += item.level // 2
+
+        # Bonus for Rarity/Enchantments
+        if isinstance(item, Weapon):
+            if item.rarity > 0:
+                xp += 10
+            if item.refinement_lvl > 0:
+                xp += item.refinement_lvl * 50
+            if item.passive != "none":
+                xp += 50
+
+        elif hasattr(item, "passive_lvl") and item.passive_lvl > 0:
+            xp += item.passive_lvl * 50
+
+        return xp * 5
+
+    # --- PASSIVE GENERATION ---
+
+    @staticmethod
+    def roll_new_passive(is_capture: bool = True) -> Tuple[str, int]:
+        """
+        Generates a (Type, Tier) tuple.
+        is_capture: Weighted heavily towards T1/T2.
+        """
+        # Roll Type
+        if random.random() < 0.01:  # 1% chance for Special Rarity
+            p_type = "s_rarity"
+        else:
+            p_type = random.choice(CompanionMechanics.PASSIVE_TYPES)
+
+        # Roll Tier
+        roll = random.random()
+        tier = 1
+
+        if is_capture:
+            # Capture Weights: T3(4%), T4(0.9%), T5(0.1%)
+            if roll > 0.95:
+                tier = 3
+            elif roll > 0.80:
+                tier = 2
+        else:
+            # Reroll/Generation Weights (Slightly better): T1(50%), T2(30%), T3(15%), T4(4%), T5(1%)
+            if roll > 0.99:
+                tier = 5
+            elif roll > 0.95:
+                tier = 4
+            elif roll > 0.80:
+                tier = 3
+            elif roll > 0.50:
+                tier = 2
+
+        return p_type, tier
+
+    @staticmethod
+    def reroll_passive(
+        current_tier: int, current_type: str = None
+    ) -> Tuple[str, int, bool]:
+        """
+        Rerolls passive using a Rune.
+        Returns: (NewType, NewTier, DidTierUp)
+        Logic:
+        - 10% Chance to Upgrade Tier (Max 5).
+        - 90% Chance to Keep Tier.
+        - Type is ALWAYS different from current_type.
+        """
+
+        # 1. Determine New Type
+        # Logic: 5% chance for s_rarity, 95% for standard.
+        # Constraint: Must not be current_type.
+
+        new_type = None
+
+        # Helper to pick from standard list excluding current
+        def pick_standard():
+            pool = [p for p in CompanionMechanics.PASSIVE_TYPES if p != current_type]
+            return random.choice(pool)
+
+        if current_type == "s_rarity":
+            # If we currently have Special Rarity, we FORCE a standard roll
+            # (since we can't be s_rarity again)
+            new_type = pick_standard()
+        else:
+            # If standard, we roll for s_rarity or different standard
+            if random.random() < 0.05:
+                new_type = "s_rarity"
+            else:
+                new_type = pick_standard()
+
+        # 2. Roll Tier Change
+        new_tier = current_tier
+        upgraded = False
+
+        roll = random.random()
+        if roll < 0.10 and current_tier < 5:  # 10% upgrade chance
+            new_tier += 1
+            upgraded = True
+
+        # Safety bounds
+        new_tier = max(1, min(5, new_tier))
+
+        return new_type, new_tier, upgraded
+
+    # --- PASSIVE COLLECTION ---
+
+    @staticmethod
+    def calculate_collection_rewards(
+        companions: List[Companion],
+        last_collect_str: str,
+        mastery_nodes: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Calculates passive rewards based on time elapsed and active companions.
+        Pass mastery_nodes (from companion_mastery.nodes_owned) to apply tree bonuses.
+        """
+        if not last_collect_str or not companions:
+            return {"items": [], "cycles": 0, "can_collect": False}
+
+        try:
+            last_time = datetime.fromisoformat(last_collect_str)
+        except ValueError:
+            return {"items": [], "cycles": 0, "can_collect": False}
+
+        diff = (datetime.now() - last_time).total_seconds()
+        cycles = int(diff // CompanionMechanics.COLLECTION_INTERVAL_SECONDS)
+
+        if cycles <= 0:
+            return {"items": [], "cycles": 0, "can_collect": False}
+
+        # --- Mastery node effects ---
+        from vtuber.rpg.idleology.core.companions.mastery import (
+            get_find_chance_bonus,
+            get_double_haul_chance,
+            get_max_cycles,
+            get_loot_weights,
+            is_apex_scavenger,
+            get_biased_loot_keys,
+        )
+
+        nodes = mastery_nodes or {}
+        find_bonus = get_find_chance_bonus(nodes)
+        double_haul_chance = get_double_haul_chance(nodes)
+        max_cycles = get_max_cycles(nodes)
+        weight_map = get_loot_weights(nodes)
+        apex = is_apex_scavenger(nodes)
+        biased_keys = get_biased_loot_keys(nodes) if apex else set()
+
+        # Cap cycles
+        cycles = min(cycles, max_cycles)
+
+        loot_bag = []
+
+        loot_types = list(weight_map.keys())
+        loot_weights = [weight_map[k] for k in loot_types]
+
+        for comp in companions:
+            # Chance to find *anything* this cycle: 0.5% per level + mastery bonus
+            find_chance = min(1.0, comp.level * 0.005 + find_bonus)
+
+            successful_rolls = 0
+            for _ in range(cycles):
+                if random.random() < find_chance:
+                    successful_rolls += 1
+
+            if successful_rolls > 0:
+                results = random.choices(
+                    loot_types, weights=loot_weights, k=successful_rolls
+                )
+
+                for res in results:
+                    amt = comp.level * 300 if res == "Gold" else 1
+                    loot_bag.append((res, amt))
+
+                    # double_haul: 20% chance for an extra copy of the same item
+                    if double_haul_chance > 0 and random.random() < double_haul_chance:
+                        loot_bag.append((res, amt))
+
+                    # apex_scavenger: biased loot types always get a free extra roll
+                    if apex and res in biased_keys:
+                        loot_bag.append((res, amt))
+
+        return {
+            "items": loot_bag,  # List of tuples: ("Type", Amount/1)
+            "cycles": cycles,
+            "can_collect": True,
+        }
+
+    KP_LOOT_ROLL_GOLD = 30000  # Gold payout per roll (level-100 companion equivalent)
+
+    @staticmethod
+    def roll_kp_loot(
+        mastery_nodes: Dict[str, Any] | None, count: int
+    ) -> List[Tuple[str, int]]:
+        """Rolls the companion loot table `count` times, spending Kinship Points
+        1-for-1 (see Forged Bonds mastery tree). Reuses the same weighted table
+        and Loot Affinity / Apex Scavenger / Double Haul bonuses as passive
+        collection so mastery investment carries over.
+        """
+        from vtuber.rpg.idleology.core.companions.mastery import (
+            get_biased_loot_keys,
+            get_double_haul_chance,
+            get_loot_weights,
+            is_apex_scavenger,
+        )
+
+        nodes = mastery_nodes or {}
+        weight_map = get_loot_weights(nodes)
+        double_haul_chance = get_double_haul_chance(nodes)
+        apex = is_apex_scavenger(nodes)
+        biased_keys = get_biased_loot_keys(nodes) if apex else set()
+
+        loot_types = list(weight_map.keys())
+        loot_weights = [weight_map[k] for k in loot_types]
+
+        loot_bag = []
+        results = random.choices(loot_types, weights=loot_weights, k=max(0, count))
+        for res in results:
+            amt = CompanionMechanics.KP_LOOT_ROLL_GOLD if res == "Gold" else 1
+            loot_bag.append((res, amt))
+
+            if double_haul_chance > 0 and random.random() < double_haul_chance:
+                loot_bag.append((res, amt))
+
+            if apex and res in biased_keys:
+                loot_bag.append((res, amt))
+
+        return loot_bag
+
+    @staticmethod
+    def calculate_cumulative_xp(level: int, current_exp: int) -> int:
+        """
+        Converts Level + CurrentXP into Total Cumulative XP.
+        Formula: Sum of (i * 100) for i=1 to level-1.
+        Arithmetic Series Sum: S = n/2 * (2a + (n-1)d) -> simplified: 50 * L * (L-1)
+        """
+        if level <= 1:
+            return current_exp
+
+        # XP required to reach current_level from level 1
+        xp_to_reach_level = 50 * level * (level - 1)
+        return xp_to_reach_level + current_exp
+
+    @staticmethod
+    def calculate_level_from_xp(total_xp: int) -> Tuple[int, int]:
+        """
+        Converts Total Cumulative XP back into (Level, CurrentXP).
+        Max Level 100.
+        """
+        level = 1
+        while level < CompanionMechanics.MAX_LEVEL:
+            req_xp = level * 100
+            if total_xp >= req_xp:
+                total_xp -= req_xp
+                level += 1
+            else:
+                break
+        return level, total_xp
+
+    @staticmethod
+    def fuse_attributes(comp_a, comp_b) -> dict:
+        """
+        Picks random traits from parents.
+        """
+        # Coin flips for traits
+        base_source = random.choice([comp_a, comp_b])
+
+        # Determine balanced passive inheritance
+        a_has_balanced = (
+            comp_a.balanced_passive != "none" and comp_a.balanced_passive_tier > 0
+        )
+        b_has_balanced = (
+            comp_b.balanced_passive != "none" and comp_b.balanced_passive_tier > 0
+        )
+
+        if a_has_balanced and b_has_balanced:
+            # Both have one — 50/50 pick
+            chosen = random.choice([comp_a, comp_b])
+            child_balanced_type = chosen.balanced_passive
+            child_balanced_tier = chosen.balanced_passive_tier
+        elif a_has_balanced or b_has_balanced:
+            # Only one parent has it — 50% chance to pass it on
+            source = comp_a if a_has_balanced else comp_b
+            if random.random() < 0.5:
+                child_balanced_type = source.balanced_passive
+                child_balanced_tier = source.balanced_passive_tier
+            else:
+                child_balanced_type = "none"
+                child_balanced_tier = 0
+        else:
+            child_balanced_type = "none"
+            child_balanced_tier = 0
+
+        return {
+            "name": base_source.name,
+            "species": base_source.species,
+            "image_url": base_source.image_url,
+            "passive_type": random.choice([comp_a.passive_type, comp_b.passive_type]),
+            "passive_tier": random.choice([comp_a.passive_tier, comp_b.passive_tier]),
+            "balanced_passive": child_balanced_type,
+            "balanced_passive_tier": child_balanced_tier,
+        }
+
+    @staticmethod
+    def roll_boss_passive() -> Tuple[str, int]:
+        """
+        Generates a passive for a Boss Pet.
+        Always Tier 3 (as per specification).
+        """
+        # 5% chance for Special Rarity, otherwise standard types
+        if random.random() < 0.25:
+            p_type = "s_rarity"
+        else:
+            p_type = random.choice(CompanionMechanics.PASSIVE_TYPES)
+
+        # Boss pets always receive Tier 3 passives.
+        return p_type, 3
+
+    @staticmethod
+    def roll_balanced_passive(
+        primary_type: str, primary_tier: int, current_balanced: str = "none"
+    ) -> tuple:
+        """
+        Rolls a secondary balanced passive for a companion awakened by a Bound Engram.
+        Type is always different from the primary passive and the current balanced passive.
+        Tier = max(1, primary_tier - 2) — rewards higher-tier primaries.
+        """
+        all_types = (
+            CompanionMechanics.PASSIVE_TYPES + CompanionMechanics.RARE_PASSIVE_TYPES
+        )
+        pool = [p for p in all_types if p != primary_type and p != current_balanced]
+        if not pool:
+            pool = [p for p in all_types if p != primary_type]
+        new_type = random.choice(pool)
+        new_tier = max(1, primary_tier - 2)
+        return new_type, new_tier

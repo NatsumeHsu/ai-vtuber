@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>白璃 HAKURI｜Live2D</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/vendor/live2dcubismcore.min.js"></script>
+  <script defer src="/vendor/pixi.min.js"></script>
+  <script defer src="/vendor/cubism4.min.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <canvas id="avatar" aria-label="白璃 Live2D 角色"></canvas>
+  <header class="panel">
+    <div class="identity"><span class="dot"></span><span>HAKURI <small>白璃</small></span></div>
+    <p id="status" role="status">正在載入角色…</p>
+    <div class="actions">
+      <button id="sound" type="button">啟用聲音</button>
+      <label>音量 <input id="volume" aria-label="音量" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+      <button id="background" class="secondary" type="button">透明背景</button>
+    </div>
+    <p class="hint">語音生成後會在這裡播放，嘴型隨聲音同步。</p>
+  </header>
+  <div id="error" role="alert" hidden></div>
+  <audio id="speech" preload="auto"></audio>
+</body>
+</html>
